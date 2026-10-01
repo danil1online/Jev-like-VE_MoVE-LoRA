@@ -401,7 +401,7 @@ Jev-like LoRA-адаптер не добавляет в модель новые 
 
 Часть 1. Слой знаний: Статья про MoVE (Январь 2026)
 
-Основой для вашей идеи является фундаментальная статья [«MoVE: Mixture of Value Embeddings — A New Axis for Scaling Parametric Memory in Autoregressive Models»](https://arxiv.org/abs/2601.22887).
+Основой для вашей идеи является фундаментальная статья [«MoVE: Mixture of Value Embeddings — A New Axis for Scaling Parametric Memory in Autoregressive Models»](https://arxiv.org/html/2601.22887v1).
 
 • О чем она: Авторы доказывают, что классический подход «запихивания» знаний в веса всей нейросети неэффективен. Они предлагают отделить память (факты) от вычислений (логики).
 
@@ -413,7 +413,7 @@ Jev-like LoRA-адаптер не добавляет в модель новые 
 
 • О чем она: Они первыми упаковали идею «отказа от генерации текста» в коммерческий продукт. В их блоге описывается метод RLCD (Reinforcement Learning for Calibrated Decisions), который учит модель выдавать чистые вероятности вместо букв.
 
-• За ними тут же последовала статья ученых, оценивающих применимость Jev в науке: [«Jev for Scientific Decisions: Evaluating Semantic Choices and Claims»](https://arxiv.org/pdf/2609.24965). Она напрямую подтверждает, что Jev-подобная структура идеальна для верификации научных фактов (например, датасет PubMedQA).
+• За ними тут же последовала статья ученых, оценивающих применимость Jev в науке: [«Jev for Scientific Decisions: Evaluating Semantic Choices and Claims»](https://arxiv.org/html/2609.24965). Она напрямую подтверждает, что Jev-подобная структура идеальна для верификации научных фактов (например, датасет PubMedQA).
 
 Часть 3. Связующее звено: Слияние Jev и LoRA (Сентябрь 2026)
 
