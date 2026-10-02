@@ -1,0 +1,41 @@
+# Jev-Like LoRA adapter on top of a frozen D12 base model.
+# The base must be trained first, e.g.:
+#   base-train --config configs/base_d12_move.yaml
+# and a contrastive Jev dataset prepared:
+#   make-contrastive --output data/jev
+# Usage:
+#   jev-train --config configs/jev_lora_d12.yaml
+#   jev-eval  --config configs/jev_lora_d12.yaml
+model_tag: d12_move
+
+# Path to the base checkpoint directory (containing model_XXXXXX.pt) or a
+# direct model_XXXXXX.pt file.
+jev_base_checkpoint: checkpoints/d12_move
+jev_data_dir: data/jev
+
+lora:
+  rank: 16
+  alpha: 32.0
+  dropout: 0.0
+  target_modules: [q, k, v]
+
+jev:
+  yes_token: "да"
+  no_token: "нет"
+  letter_tokens: "АБВГДЕЖЗИКЛМНОПРСТУФХЦЧШЩЭЮЯ"
+  digit_tokens: "0123456789"
+  max_ctx_len: 1024
+  max_q_len: 256
+  max_examples_len: 1280
+  ece_bins: 15
+
+seed: 42
+resume_from_step: 0
+jev_num_iterations: 3000
+jev_warmup: 0.02
+jev_final_lr_frac: 0.1
+jev_batch_size: 16
+jev_lr: 1.0e-4
+jev_weight_decay: 0.0
+jev_eval_every: 200
+jev_save_every: 1000

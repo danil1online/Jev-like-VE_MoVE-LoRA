@@ -1,0 +1,72 @@
+[project]
+name = "jevelike"
+version = "0.1.0"
+description = "VE/MoVE base models from scratch + Jev-Like LoRA adapter for typed decisions"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "filelock>=3.19.0",
+    "numpy>=1.26.0",
+    "psutil>=7.1.0",
+    "pyarrow>=21.0.0",
+    "pyyaml>=6.0.0",
+    "requests>=2.32.0",
+    "rustbpe>=0.1.0",
+    "tiktoken>=0.11.0",
+    "torch>=2.4.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+base-train = "jevelike.train.base:main"
+base-eval = "jevelike.train.base:eval_main"
+jev-train = "jevelike.train.jev_lora:main"
+jev-eval = "jevelike.train.jev_lora:eval_main"
+tok-train = "jevelike.train.tokenizer:main"
+prepare-ruwiki = "jevelike.data.prep:main"
+make-contrastive = "jevelike.data.contrastive:main"
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+# target torch to cuda 12.8 or CPU
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu128", extra = "gpu" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[project.optional-dependencies]
+cpu = [
+    "setuptools>=65.0.0",
+]
+gpu = []
+
+[tool.uv]
+default-groups = []
+conflicts = [
+    [
+        { extra = "cpu" },
+        { extra = "gpu" },
+    ],
+]

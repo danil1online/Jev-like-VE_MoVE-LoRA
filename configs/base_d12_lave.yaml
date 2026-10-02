@@ -1,0 +1,45 @@
+# D12 + LaVE: per-layer value-embedding bank (1 slot each) on alternating layers,
+# ungated standard path (gate only on the extra term).
+# Usage: base-train --config configs/base_d12_lave.yaml
+model_tag: d12_lave
+
+model:
+  sequence_len: 2048
+  vocab_size: 65536        # overwritten from the tokenizer at startup
+  n_layer: 12
+  n_head: 6
+  n_kv_head: 6
+  n_embd: 768
+  window_pattern: SSSL
+  softcap: 15.0
+
+move:
+  mode: lave
+  lave_slots: 1
+  lave_layers: alt
+  gate_input: full
+  gate_scale: 2.0
+  gated_standard: false
+
+seed: 42
+max_steps: 100000
+warmup_steps: 40
+warmdown_ratio: 0.65
+final_lr_frac: 0.05
+resume_from_step: 0
+save_every: 2500
+eval_every: 250
+sample_every: 0
+
+device_batch_size: 32
+total_batch_size: -1
+target_param_data_ratio: 12.0
+
+matrix_lr: 0.02
+unembedding_lr: 0.004
+embedding_lr: 0.2
+scalar_lr: 0.5
+move_gate_lr: 0.005
+weight_decay: 0.28
+muon_momentum: 0.95
+grad_clip: 1.0
