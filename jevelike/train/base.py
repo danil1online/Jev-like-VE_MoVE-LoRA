@@ -341,6 +341,9 @@ def main():
                 group["weight_decay"] = muon_weight_decay
         if scaler is not None:
             scaler.unscale_(optimizer)
+        if cfg.grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+        if scaler is not None:
             scaler.step(optimizer)
             scaler.update()
         else:

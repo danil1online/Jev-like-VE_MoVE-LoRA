@@ -369,7 +369,7 @@ class GPT(nn.Module):
         if return_hidden:
             return x
 
-        softcap = 15
+        softcap = self.config.softcap
         logits = self.lm_head(x)
         logits = logits[..., :self.config.vocab_size]
         logits = logits.float()

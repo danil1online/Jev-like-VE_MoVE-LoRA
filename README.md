@@ -38,6 +38,7 @@ jevelike/
   train/
     base.py         base-train / base-eval
     jev_lora.py     jev-train / jev-eval
+    jev_ask.py      jev-ask (System One inference: text + question -> answer + p)
     tokenizer.py    tok-train
 configs/            base_d12_off / base_d12_move / base_d12_lave / base_d20_move / jev_lora_d12
 tests/              pytest suite (CPU, tiny models)
@@ -67,8 +68,8 @@ uv pip install --python .venv/bin/python --reinstall-package torch \
 > these files on this machine; reinstalling torch via uv keeps them working.
 
 The tools are exposed as console scripts (`base-train`, `base-eval`,
-`jev-train`, `jev-eval`, `tok-train`, `prepare-ruwiki`, `make-contrastive`)
-via `[project.scripts]`. They require the project to be installed once:
+`jev-train`, `jev-eval`, `jev-ask`, `tok-train`, `prepare-ruwiki`,
+`make-contrastive`) via `[project.scripts]`. They require the project to be installed once:
 
 ```bash
 uv pip install -e .        # from the repo root, inside the venv
@@ -112,23 +113,19 @@ simplest path.
    Checkpoints land in `checkpoints/<model_tag>/model_XXXXXX.pt` (+ meta,
    optimizer). `base-eval --model-tag d12_move --step 100000` reports val bpb.
 
-4. **Build the Jev dataset** (NOUL contrastive, resumable; needs an
-   OpenAI-compatible API, env `JEV_API_BASE` / `JEV_API_KEY` / `JEV_MODEL`).
-   Input JSONL rows: `{"text": ..., "question": ...}`. The script appends one
-   JSONL row per answered pair; then split it into the two files the trainer
-   expects (`<jev_data_dir>/train.jsonl` and `val.jsonl`, e.g. 90/10):
+4. **Build the Jev dataset** (LLM-as-Teacher contrastive pairs, resumable;
+   needs an OpenAI-compatible API, env `JEV_API_BASE` / `JEV_API_KEY` /
+   `JEV_MODEL`). Input: JSONL `{"text": ...}` rows or a plain `.txt` file
+   (one text per line). For each text the LLM produces a `true_statement` and
+   a `false_statement` that differs in exactly one fact, yielding two rows
+   (answer `да` / `нет`) that share a `pair_id`. Output: `<output>/raw.jsonl`
+   (resumable) plus a deterministic split into `train.jsonl` / `val.jsonl`
+   where both rows of a pair always land in the same split:
 
    ```bash
-   make-contrastive --input my_pairs.jsonl --output data/jev/answers.jsonl
-   python - <<'EOF'
-   import json
-   rows = [json.loads(l) for l in open("data/jev/answers.jsonl") if l.strip()]
-   cut = int(len(rows) * 0.9)
-   for name, part in (("train", rows[:cut]), ("val", rows[cut:])):
-       with open(f"data/jev/{name}.jsonl", "w") as f:
-           for r in part:
-               f.write(json.dumps(r, ensure_ascii=False) + "\n")
-   EOF
+   make-contrastive --input texts.jsonl --output data/jev --val-frac 0.1
+   # re-split from an existing raw.jsonl without API calls:
+   make-contrastive --input texts.jsonl --output data/jev --split-only
    ```
 
 5. **Train the Jev-Like-LoRA adapter** (base frozen):
@@ -137,12 +134,28 @@ simplest path.
    jev-train --config configs/jev_lora_d12.yaml
    ```
 
-    Adapters land in `jev_checkpoints/<model_tag>/adapter_XXXXXX.pt`.
+   Adapters land in `jev_checkpoints/<model_tag>/adapter_XXXXXX.pt`. After
+   training, a per-task post-hoc temperature is fit on the val split
+   (minimizing log-loss) and written to
+   `jev_checkpoints/<model_tag>/calibration.json`.
 
-6. **Evaluate the adapter** (per-task accuracy / ECE / brier / logloss):
+6. **Evaluate the adapter** (per-task accuracy / ECE / brier / logloss, with
+   before/after-calibration comparison when `calibration.json` exists):
 
    ```bash
    jev-eval --config configs/jev_lora_d12.yaml [--adapter PATH]
+   ```
+
+7. **Ask the adapter** (System One inference: one forward pass, answer word +
+   probability over the task candidates; `--question` is repeatable and all
+   questions share one pass; the calibrated temperature is applied
+   automatically):
+
+   ```bash
+   jev-ask --config configs/jev_lora_d12.yaml --task noul \
+       --text "Иван Иванов оформил возврат товара." \
+       --question "Иван Иванов оформил возврат товара?"
+   # context from stdin; override the temperature with --temperature
    ```
 
 ## Config reference
@@ -170,7 +183,7 @@ Answer candidate layout (40 total): `[0:2]` да/нет, `[2:30]` letters,
 CPU-only, tiny models, no data downloads:
 
 ```bash
-.venv/bin/python -m pytest tests/ -q        # 44 tests
+.venv/bin/python -m pytest tests/ -q        # 67 tests
 .venv/bin/python -m pytest tests/ -m "not slow"
 ```
 
@@ -189,5 +202,9 @@ ids are exact) and a real small rustbpe tokenizer for roundtrip tests.
   (numerically) identity: `extra_out` copies `lm_head` rows and LoRA `B = 0`.
 - Attention is BTHD; logits are softcapped; `lm_head` init std 0.001 (not tied
   to the token embedding).
+- **Per-task probabilities**: `adapter.probs` is a softmax over all 40
+  candidates; per-task probabilities (metrics, `jev-ask`) are the restricted
+  softmax over that task's slice, followed by the post-hoc temperature from
+  `calibration.json` (`calibrate_probs` / `fit_temperature` in `jev.py`).
 - rustbpe merge order is not frequency-controllable on small corpora, so tests
   never rely on a specific word being a single token.

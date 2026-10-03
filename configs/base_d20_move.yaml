@@ -39,5 +39,4 @@ embedding_lr: 0.2
 scalar_lr: 0.5
 move_gate_lr: 0.005
 weight_decay: 0.28
-muon_momentum: 0.95
 grad_clip: 1.0

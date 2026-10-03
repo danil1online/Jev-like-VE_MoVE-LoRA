@@ -38,6 +38,7 @@ jevelike/
   train/
     base.py         base-train / base-eval
     jev_lora.py     jev-train / jev-eval
+    jev_ask.py      jev-ask (инференс System One: текст + вопрос -> ответ + p)
     tokenizer.py    tok-train
 configs/            base_d12_off / base_d12_move / base_d12_lave / base_d20_move / jev_lora_d12
 tests/              pytest-сьют (CPU, крошечные модели)
@@ -68,8 +69,8 @@ uv pip install --python .venv/bin/python --reinstall-package torch \
 > переустановка torch через uv сохраняет их рабочими.
 
 Инструменты вынесены в консольные скрипты (`base-train`, `base-eval`,
-`jev-train`, `jev-eval`, `tok-train`, `prepare-ruwiki`, `make-contrastive`)
-через `[project.scripts]`. Для них проект нужно один раз установить:
+`jev-train`, `jev-eval`, `jev-ask`, `tok-train`, `prepare-ruwiki`,
+`make-contrastive`) через `[project.scripts]`. Для них проект нужно один раз установить:
 
 ```bash
 uv pip install -e .        # из корня репо, внутри venv
@@ -114,24 +115,19 @@ uv pip install -e .        # из корня репо, внутри venv
    (+ meta, optimizer). `base-eval --model-tag d12_move --step 100000`
    выдаёт val bpb.
 
-4. **Сборка Jev-датасета** (NOUL-контрастив, возобновляемый; нужен
-   OpenAI-совместимый API, env `JEV_API_BASE` / `JEV_API_KEY` / `JEV_MODEL`).
-   Строки входного JSONL: `{"text": ..., "question": ...}`. Скрипт добавляет
-   по одной строке JSONL на каждую отвеченную пару; затем разбейте её на два
-   файла, которые ожидает тренер (`<jev_data_dir>/train.jsonl` и `val.jsonl`,
-   например 90/10):
+4. **Сборка Jev-датасета** (LLM-as-Teacher, контрастивные пары, возобновляемо;
+   нужен OpenAI-совместимый API, env `JEV_API_BASE` / `JEV_API_KEY` /
+   `JEV_MODEL`). Вход: JSONL-строки `{"text": ...}` или обычный `.txt` файл
+   (один текст на строку). Для каждого текста LLM выдаёт `true_statement` и
+   `false_statement`, отличающееся ровно одним фактом; получается две строки
+   (ответ `да` / `нет`) с общим `pair_id`. Выход: `<output>/raw.jsonl`
+   (возобновляемый) плюс детерминированное разбиение на `train.jsonl` /
+   `val.jsonl`, где обе строки пары всегда попадают в один сплит:
 
    ```bash
-   make-contrastive --input my_pairs.jsonl --output data/jev/answers.jsonl
-   python - <<'EOF'
-   import json
-   rows = [json.loads(l) for l in open("data/jev/answers.jsonl") if l.strip()]
-   cut = int(len(rows) * 0.9)
-   for name, part in (("train", rows[:cut]), ("val", rows[cut:])):
-       with open(f"data/jev/{name}.jsonl", "w") as f:
-           for r in part:
-               f.write(json.dumps(r, ensure_ascii=False) + "\n")
-   EOF
+   make-contrastive --input texts.jsonl --output data/jev --val-frac 0.1
+   # пере-разбить из готового raw.jsonl без вызовов API:
+   make-contrastive --input texts.jsonl --output data/jev --split-only
    ```
 
 5. **Обучение Jev-Like-LoRA адаптера** (база заморожена):
@@ -141,11 +137,27 @@ uv pip install -e .        # из корня репо, внутри venv
    ```
 
    Адаптеры складываются в `jev_checkpoints/<model_tag>/adapter_XXXXXX.pt`.
+   После обучения на val-сплите подбирается post-hoc температура по каждой
+   задаче (минимизация log-loss) и записывается в
+   `jev_checkpoints/<model_tag>/calibration.json`.
 
-6. **Оценка адаптера** (accuracy / ECE / brier / logloss по каждой задаче):
+6. **Оценка адаптера** (accuracy / ECE / brier / logloss по каждой задаче,
+   с сравнением до/после калибровки, если есть `calibration.json`):
 
    ```bash
    jev-eval --config configs/jev_lora_d12.yaml [--adapter PATH]
+   ```
+
+7. **Вопрос адаптеру** (инференс System One: один forward pass, слово-ответ +
+   вероятность по кандидатам задачи; `--question` повторяемый, все вопросы
+   идут одним forward pass'ом; калиброванная температура применяется
+   автоматически):
+
+   ```bash
+   jev-ask --config configs/jev_lora_d12.yaml --task noul \
+       --text "Иван Иванов оформил возврат товара." \
+       --question "Иван Иванов оформил возврат товара?"
+   # контекст из stdin; переопределить температуру: --temperature
    ```
 
 ## Справочник по конфигам
@@ -173,7 +185,7 @@ uv pip install -e .        # из корня репо, внутри venv
 Только CPU, крошечные модели, без скачивания данных:
 
 ```bash
-.venv/bin/python -m pytest tests/ -q        # 44 теста
+.venv/bin/python -m pytest tests/ -q        # 67 тестов
 .venv/bin/python -m pytest tests/ -m "not slow"
 ```
 
@@ -193,6 +205,10 @@ roundtrip-тестов.
   (численно) тождественен: `extra_out` копирует строки `lm_head`, LoRA `B = 0`.
 - Внимания в BTHD; логиты softcapped; init std `lm_head` = 0.001 (не связан
   с токеновским эмбеддингом).
+- **Вероятности по задачам**: `adapter.probs` — softmax по всем 40
+  кандидатам; per-task вероятности (метрики, `jev-ask`) — restricted softmax
+  по слайсу задачи, затем post-hoc температура из `calibration.json`
+  (`calibrate_probs` / `fit_temperature` в `jev.py`).
 - Порядок слияний rustbpe на маленьких корпусах нельзя контролировать по
   частоте, поэтому тесты никогда не полагаются на то, что конкретное слово —
   один токен.

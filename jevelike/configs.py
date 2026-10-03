@@ -220,7 +220,6 @@ class TrainConfig:
     scalar_lr: float = 0.5
     move_gate_lr: float = 0.005
     weight_decay: float = 0.28
-    muon_momentum: float = 0.95
     grad_clip: float = 1.0
 
     # --- jev adapter training ---

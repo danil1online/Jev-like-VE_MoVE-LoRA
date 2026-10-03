@@ -89,7 +89,9 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
             doc_buffer.append(tokens)
 
     # Pre-allocate buffers once: layout is [inputs (B*T) | targets (B*T)]
-    use_cuda = device == "cuda"
+    if not isinstance(device, torch.device):
+        device = torch.device(device)
+    use_cuda = device.type == "cuda"
     row_buffer = torch.empty((B, row_capacity), dtype=torch.long)
     cpu_buffer = torch.empty(2 * B * T, dtype=torch.long, pin_memory=use_cuda)
     gpu_buffer = torch.empty(2 * B * T, dtype=torch.long, device=device)

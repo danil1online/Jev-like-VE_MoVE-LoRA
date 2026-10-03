@@ -6,13 +6,15 @@ The answer is a single token from a small candidate set (да/нет, letters, d
 predicted at the last position of the prompt. Loss is restricted cross-entropy
 over the candidate tokens.
 """
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from jevelike.configs import LoraConfig, JevConfig
 from jevelike.gpt import Linear
-from jevelike.lora import apply_lora, freeze_base, LoRALinear
+from jevelike.lora import apply_lora, freeze_base, LoRALinear, TARGET_MAP
 
 SPECIAL_TOKENS = ("<|bos|>", "<|ctx|>", "<|q|>", "<|a|>")
 IGNORE_INDEX = -100
@@ -138,6 +140,30 @@ def calibration_metrics(probs, target_idx, bins: int = 15):
     return {"accuracy": acc, "ece": ece, "brier": brier, "logloss": logloss, "n": int(target_idx.numel())}
 
 
+def calibrate_probs(probs, temperature: float):
+    """Post-hoc temperature scaling: softmax(log(p) / T). T=1 is a no-op."""
+    if temperature == 1.0:
+        return probs
+    logp = torch.log(probs.to(torch.float32).clamp(min=1e-12))
+    return torch.softmax(logp / temperature, dim=-1)
+
+
+def fit_temperature(probs, target_idx, lo: float = 0.05, hi: float = 10.0, steps: int = 200):
+    """Fit a post-hoc temperature on validation probs by minimizing log-loss.
+    Returns (temperature, best_logloss)."""
+    probs = probs.to(torch.float32).clamp(min=1e-12)
+    target_idx = target_idx.to(torch.long)
+    logp = torch.log(probs)
+    grid = torch.linspace(math.log(lo), math.log(hi), steps).exp().tolist()
+    best_t, best_ll = 1.0, float("inf")
+    for t in grid:
+        p = torch.softmax(logp / t, dim=-1)
+        ll = F.nll_loss(torch.log(p.clamp(min=1e-12)), target_idx).item()
+        if ll < best_ll:
+            best_t, best_ll = t, ll
+    return best_t, best_ll
+
+
 # -----------------------------------------------------------------------------
 # Adapter
 
@@ -207,3 +233,48 @@ class JevAdapter(nn.Module):
         params.append(self.extra_in)
         params.append(self.extra_out.weight)
         return params
+
+    # ------------------------------------------------------------------
+    # Checkpointing: compact adapter state (trainable weights only, no base)
+    # ------------------------------------------------------------------
+
+    def _lora_param_map(self):
+        target = {}
+        for i, block in enumerate(self.model.transformer.h):
+            for block_attr, module_attr in TARGET_MAP.values():
+                m = getattr(getattr(block, block_attr), module_attr)
+                if isinstance(m, LoRALinear):
+                    prefix = f"h.{i}.{block_attr}.{module_attr}"
+                    target[f"{prefix}.lora_A"] = m.lora_A
+                    target[f"{prefix}.lora_B"] = m.lora_B
+        return target
+
+    def adapter_state_dict(self):
+        """Compact state of the trainable adapter only (LoRA A/B + extra_in/out).
+        The frozen base model is NOT included; it must be loaded separately from
+        the base checkpoint (see meta['base_checkpoint'])."""
+        state = {k: p for k, p in self._lora_param_map().items()}
+        state["extra_in"] = self.extra_in
+        state["extra_out.weight"] = self.extra_out.weight
+        return state
+
+    def load_adapter_state(self, state):
+        """Load a compact adapter state into an already-built adapter (base weights
+        come from the base checkpoint). Legacy full checkpoints (keys prefixed with
+        'model.') are still accepted."""
+        state = dict(state)
+        if any(k.startswith("model.") for k in state):
+            self.load_state_dict(state, strict=True)
+            return
+        target = self._lora_param_map()
+        target["extra_in"] = self.extra_in
+        target["extra_out.weight"] = self.extra_out.weight
+        unknown = sorted(set(state) - set(target))
+        if unknown:
+            raise ValueError(f"Unknown adapter state keys: {unknown}")
+        missing = sorted(set(target) - set(state))
+        if missing:
+            raise ValueError(f"Missing adapter state keys (LoRA target mismatch?): {missing}")
+        with torch.no_grad():
+            for k, v in state.items():
+                target[k].copy_(v.to(target[k].dtype))

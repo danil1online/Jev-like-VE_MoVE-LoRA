@@ -26,7 +26,10 @@ from jevelike.common import (
 )
 from jevelike.configs import load_config, save_config
 from jevelike.checkpoint import find_last_step, build_model, save_adapter, load_adapter
-from jevelike.jev import JevAdapter, JevRenderer, IGNORE_INDEX, calibration_metrics
+from jevelike.jev import (
+    JevAdapter, JevRenderer, IGNORE_INDEX, calibration_metrics,
+    calibrate_probs, fit_temperature,
+)
 from jevelike.tokenizer import get_tokenizer
 
 TASK_ORDER = ("noul", "choice", "score")
@@ -124,8 +127,18 @@ def task_slices(renderer):
     return slices
 
 
-def evaluate_adapter(adapter, rendered, device, batch_size=32):
-    """Per-task accuracy/ECE/Brier/logloss on rendered items."""
+def check_adapter_meta(a_meta, cfg, path):
+    """Warn if the adapter was trained on a different base than the config points to."""
+    saved_base = a_meta.get("base_checkpoint")
+    if saved_base and cfg.jev_base_checkpoint and \
+            os.path.normpath(saved_base) != os.path.normpath(cfg.jev_base_checkpoint):
+        print0(f"WARNING: adapter {path} was trained on base {saved_base!r}, "
+               f"but config points to {cfg.jev_base_checkpoint!r}; the config base is used.")
+
+
+def collect_probs(adapter, rendered, device, batch_size=32):
+    """Per-task (probs, target) tensors over rendered items (answer positions only).
+    Both rows of a batch share one forward pass; adapter is left in eval mode."""
     renderer = adapter.renderer
     slices = task_slices(renderer)
     per_task = {t: {"probs": [], "target": []} for t in TASK_ORDER}
@@ -134,23 +147,31 @@ def evaluate_adapter(adapter, rendered, device, batch_size=32):
         for i in range(0, len(rendered), batch_size):
             chunk = rendered[i:i + batch_size]
             x, labels, meta = make_cached_batch(chunk)
-            x, labels = x.to(device), labels.to(device)
+            x = x.to(device)
             probs = adapter.probs(x)
             for j, m in enumerate(meta):
                 task = m["task"]
                 s, e = slices[task]
+                # restricted softmax over this task's candidates (the global
+                # adapter softmax spreads mass over all 40 candidates)
                 p = probs[j, m["pos"], s:e]
+                p = p / p.sum(-1, keepdim=True)
                 cand_idx = renderer.word_to_cand[m["answer"]]
-                local = cand_idx - s
                 per_task[task]["probs"].append(p.cpu())
-                per_task[task]["target"].append(local)
-    results = {}
+                per_task[task]["target"].append(cand_idx - s)
+    out = {}
     for task in TASK_ORDER:
         if per_task[task]["probs"]:
-            probs = torch.stack(per_task[task]["probs"])
-            target = torch.tensor(per_task[task]["target"], dtype=torch.long)
-            results[task] = calibration_metrics(probs, target, bins=adapter.jev_cfg.ece_bins)
-    return results
+            out[task] = (torch.stack(per_task[task]["probs"]),
+                         torch.tensor(per_task[task]["target"], dtype=torch.long))
+    return out
+
+
+def evaluate_adapter(adapter, rendered, device, batch_size=32):
+    """Per-task accuracy/ECE/Brier/logloss on rendered items."""
+    bins = adapter.jev_cfg.ece_bins
+    return {task: calibration_metrics(probs, target, bins=bins)
+            for task, (probs, target) in collect_probs(adapter, rendered, device, batch_size).items()}
 
 
 def main():
@@ -179,6 +200,7 @@ def main():
     print0(f"Base move config: {json.dumps(meta_data.get('move_config', {}))}")
 
     adapter = JevAdapter(model, cfg.lora, cfg.jev, tokenizer)
+    adapter.train()  # base is frozen anyway; enables LoRA dropout in train mode
     n_train = sum(p.numel() for p in adapter.trainable_params())
     print0(f"Adapter trainable params: {n_train:,}")
 
@@ -201,7 +223,9 @@ def main():
                                         f"adapter_{resume_step:06d}.pt")
         if os.path.exists(adapter_path):
             adapter_state, step, a_meta = load_adapter(adapter_path, device)
-            adapter.load_state_dict(adapter_state)
+            adapter.load_adapter_state(adapter_state)
+            check_adapter_meta(a_meta, cfg, adapter_path)
+            adapter.train()
             print0(f"Resumed adapter from {adapter_path} step {step}")
 
     # optimizer: single AdamW group over all trainable adapter params
@@ -246,6 +270,7 @@ def main():
         if (cfg.jev_eval_every > 0 and (step == num_iterations - 1 or
                 step > 0 and step % cfg.jev_eval_every == 0)) or step == 0:
             results = evaluate_adapter(adapter, val_rendered, device)
+            adapter.train()  # evaluate_adapter switches to eval mode
             for task, m in results.items():
                 log_payload[f"val/{task}/acc"] = m["accuracy"]
                 log_payload[f"val/{task}/ece"] = m["ece"]
@@ -261,7 +286,7 @@ def main():
         if (cfg.jev_save_every > 0 and step > 0 and step % cfg.jev_save_every == 0) or step == num_iterations - 1:
             out_dir = os.path.join(get_base_dir(), "jev_checkpoints", cfg.model_tag)
             save_adapter(os.path.join(out_dir, f"adapter_{step:06d}.pt"), step,
-                         adapter.state_dict(),
+                         adapter.adapter_state_dict(),
                          meta_data={
                              "base_checkpoint": cfg.jev_base_checkpoint,
                              "base_meta": {k: meta_data[k] for k in ("model_config", "move_config") if k in meta_data},
@@ -270,7 +295,28 @@ def main():
                          })
         step += 1
 
-    logger.log(done=True, total_training_time=time.time())
+    # post-hoc per-task temperature calibration on val
+    out_dir = os.path.join(get_base_dir(), "jev_checkpoints", cfg.model_tag)
+    calib = {}
+    calib_payload = {"done": True, "total_training_time": time.time()}
+    bins = cfg.jev.ece_bins
+    for task, (probs, target) in collect_probs(adapter, val_rendered, device).items():
+        t, _ = fit_temperature(probs, target)
+        before = calibration_metrics(probs, target, bins=bins)
+        after = calibration_metrics(calibrate_probs(probs, t), target, bins=bins)
+        calib[task] = t
+        calib_payload[f"calib/{task}/T"] = t
+        calib_payload[f"calib/{task}/logloss_before"] = before["logloss"]
+        calib_payload[f"calib/{task}/logloss_after"] = after["logloss"]
+        calib_payload[f"calib/{task}/ece_before"] = before["ece"]
+        calib_payload[f"calib/{task}/ece_after"] = after["ece"]
+        print0(f"calibration[{task}]: T={t:.3f} | logloss {before['logloss']:.4f} -> {after['logloss']:.4f} | "
+               f"ece {before['ece']:.4f} -> {after['ece']:.4f} | n={target.numel()}")
+    calib_path = os.path.join(out_dir, "calibration.json")
+    with open(calib_path, "w", encoding="utf-8") as f:
+        json.dump(calib, f, indent=2)
+    print0(f"Saved calibration to {calib_path}")
+    logger.log(**calib_payload)
     logger.close()
     compute_cleanup(device_type)
 
@@ -300,19 +346,35 @@ def eval_main():
         adapter_path = os.path.join(adapter_dir, best)
     print0(f"Loading adapter from {adapter_path}")
     adapter_state, step, a_meta = load_adapter(adapter_path, device)
-    adapter.load_state_dict(adapter_state)
+    adapter.load_adapter_state(adapter_state)
+    check_adapter_meta(a_meta, cfg, adapter_path)
+    adapter.eval()
     print0(f"Adapter step: {step}")
 
     data_dir = cfg.jev_data_dir
     val_items = load_jev_items(os.path.join(data_dir, "val.jsonl"))
     val_rendered = render_cache(adapter.renderer, val_items, "val_cache.pt")
-    results = evaluate_adapter(adapter, val_rendered, device)
+    raw = collect_probs(adapter, val_rendered, device)
+    calib_path = os.path.join(adapter_dir, "calibration.json")
+    calib = {}
+    if os.path.exists(calib_path):
+        with open(calib_path, "r", encoding="utf-8") as f:
+            calib = json.load(f)
+        print0(f"Using calibration from {calib_path}: {calib}")
+    bins = cfg.jev.ece_bins
     print0(f"\nStep {step} | Jev evaluation:")
     for task in TASK_ORDER:
-        if task in results:
-            m = results[task]
-            print0(f"  {task:8s} | acc: {m['accuracy']:.4f} | ece: {m['ece']:.4f} | "
-                   f"brier: {m['brier']:.4f} | logloss: {m['logloss']:.4f} | n: {m['n']}")
+        if task not in raw:
+            continue
+        probs, target = raw[task]
+        m = calibration_metrics(probs, target, bins=bins)
+        line = (f"  {task:8s} | acc: {m['accuracy']:.4f} | ece: {m['ece']:.4f} | "
+                f"brier: {m['brier']:.4f} | logloss: {m['logloss']:.4f} | n: {m['n']}")
+        if task in calib:
+            m2 = calibration_metrics(calibrate_probs(probs, calib[task]), target, bins=bins)
+            line += (f" | T={calib[task]:.3f}: logloss {m['logloss']:.4f}->{m2['logloss']:.4f}, "
+                     f"ece {m['ece']:.4f}->{m2['ece']:.4f}")
+        print0(line)
     compute_cleanup(device_type)
 
 

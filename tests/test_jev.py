@@ -3,7 +3,7 @@ import torch
 
 from jevelike.jev import (
     JevRenderer, JevAdapter, jev_ce_loss, answer_probs, decide,
-    calibration_metrics, IGNORE_INDEX,
+    calibration_metrics, calibrate_probs, fit_temperature, IGNORE_INDEX,
 )
 from conftest import build_tiny
 
@@ -120,6 +120,40 @@ def test_calibration_metrics():
     assert m2["logloss"] > 0
 
 
+def test_calibrate_probs():
+    K = 4
+    torch.manual_seed(3)
+    p = torch.softmax(torch.randn(50, K), dim=-1)
+    # T=1 is a no-op
+    assert calibrate_probs(p, 1.0) is p
+    # T>1 flattens (towards uniform), T<1 sharpens; both keep a valid distribution
+    for t in (2.0, 0.5):
+        pc = calibrate_probs(p, t)
+        torch.testing.assert_close(pc.sum(-1), torch.ones(50), rtol=0, atol=1e-6)
+    flat = calibrate_probs(p, 10.0)
+    sharp = calibrate_probs(p, 0.1)
+    assert flat.max(-1).values.max().item() < p.max(-1).values.max().item()
+    assert sharp.max(-1).values.max().item() > p.max(-1).values.max().item()
+    # applying T1 then 1/T1 returns to the original distribution
+    torch.testing.assert_close(calibrate_probs(calibrate_probs(p, 2.0), 0.5), p, rtol=1e-5, atol=1e-6)
+
+
+def test_fit_temperature_recovers_one_on_calibrated_data():
+    torch.manual_seed(11)
+    N, K = 20000, 10
+    base = torch.softmax(torch.randn(N, K), dim=-1)
+    # sample targets from p itself -> the data is perfectly calibrated, optimal T = 1
+    target = torch.distributions.Categorical(base).sample()
+    t, ll = fit_temperature(base, target)
+    assert 0.9 < t < 1.1
+    # returned logloss is the minimum over the (log-uniform) grid
+    import math
+    grid = torch.linspace(math.log(0.05), math.log(10.0), 200).exp()
+    lls = [calibration_metrics(calibrate_probs(base, g), target)["logloss"] for g in grid.tolist()]
+    assert ll <= min(lls) + 1e-9
+    assert abs(t - min(grid.tolist(), key=lambda g: lls[grid.tolist().index(g)])) < 1e-9
+
+
 def _make_adapter(model_config, lora_config, jev_config, fake_tokenizer):
     model = build_tiny(model_config, mode="off")
     adapter = JevAdapter(model, lora_config, jev_config, fake_tokenizer)
@@ -156,6 +190,47 @@ def test_adapter_freeze_and_param_count(fake_tokenizer, model_config, lora_confi
     assert grad_ids == {id(p) for p in trainable}
     assert not model.transformer.wte.weight.requires_grad
     assert not model.lm_head.weight.requires_grad
+
+
+def test_adapter_compact_state_roundtrip(fake_tokenizer, model_config, lora_config, jev_config):
+    model, adapter = _make_adapter(model_config, lora_config, jev_config, fake_tokenizer)
+    # move the adapter away from init so the state is non-trivial
+    with torch.no_grad():
+        for p in adapter.trainable_params():
+            p.add_(torch.randn_like(p) * 0.1)
+    # compact state: trainable weights only, no base keys
+    state = adapter.adapter_state_dict()
+    n_train = sum(p.numel() for p in adapter.trainable_params())
+    assert sum(v.numel() for v in state.values()) == n_train
+    assert all(not k.startswith("model.") for k in state)
+    x, labels, _ = adapter.renderer.make_batch([
+        {"text": "a b", "question": "q", "answer": "да", "task": "noul"},
+    ])
+    adapter.eval()
+    with torch.no_grad():
+        ref_loss = adapter(x, labels)
+    # load into a fresh adapter (same frozen base, built deterministically)
+    model2 = build_tiny(model_config, mode="off")
+    adapter2 = JevAdapter(model2, lora_config, jev_config, fake_tokenizer)
+    adapter2.load_adapter_state(state)
+    for p1, p2 in zip(adapter.trainable_params(), adapter2.trainable_params()):
+        torch.testing.assert_close(p1, p2)
+    adapter2.eval()
+    with torch.no_grad():
+        torch.testing.assert_close(adapter2(x, labels), ref_loss)
+    # legacy full checkpoint (model.* keys) is still accepted
+    full = adapter.state_dict()
+    assert any(k.startswith("model.") for k in full)
+    adapter3 = JevAdapter(build_tiny(model_config, mode="off"), lora_config, jev_config, fake_tokenizer)
+    adapter3.load_adapter_state(full)
+    adapter3.eval()
+    with torch.no_grad():
+        torch.testing.assert_close(adapter3(x, labels), ref_loss)
+    # unknown / missing keys are rejected
+    with pytest.raises(ValueError, match="Unknown adapter state keys"):
+        adapter2.load_adapter_state({**state, "bogus": torch.zeros(1)})
+    with pytest.raises(ValueError, match="Missing adapter state keys"):
+        adapter2.load_adapter_state({k: v for k, v in state.items() if k != "extra_in"})
 
 
 def test_adapter_forward_backward(fake_tokenizer, model_config, lora_config, jev_config):
