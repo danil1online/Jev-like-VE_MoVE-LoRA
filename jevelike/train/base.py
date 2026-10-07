@@ -46,6 +46,33 @@ SAMPLE_PROMPTS = [
 ]
 
 
+@torch.no_grad()
+def value_health_stats(model):
+    """Health metrics of value-embedding banks and router gates (lesson from the
+    gefen experiment: dead bank rows / saturated gates show up as a loss plateau)."""
+    stats = {}
+    banks = []
+    move_bank = getattr(model, "move_bank", None)
+    if move_bank is not None:
+        banks.append(move_bank.weight)
+    banks.extend(b.weight for b in getattr(model, "value_embeds", {}).values())
+    if banks:
+        row_norms = torch.cat([w.float().view(w.shape[0], -1).norm(dim=1) for w in banks])
+        stats["ve/bank_rows"] = int(row_norms.numel())
+        stats["ve/bank_norm_mean"] = float(row_norms.mean().item())
+        stats["ve/bank_dead_frac"] = float((row_norms < 1e-4).float().mean().item())
+    gate_norms = []
+    for block in model.transformer.h:
+        gate = getattr(block.attn, "ve_gate", None)
+        if gate is not None:
+            gate_norms.append(gate.weight.float().norm())
+    if gate_norms:
+        gn = torch.stack(gate_norms)
+        stats["ve/gate_norm_mean"] = float(gn.mean().item())
+        stats["ve/gate_norm_max"] = float(gn.max().item())
+    return stats
+
+
 def parse_args():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", type=str, required=True, help="path to YAML config")
@@ -265,7 +292,7 @@ def main():
     # ------------------------------------------------------------------
     # Training loop
     # ------------------------------------------------------------------
-    eval_tokens = 4 * 2 ** 20  # ~4.2M tokens of val evaluation
+    eval_tokens = cfg.eval_tokens  # val tokens per evaluation (default ~4.2M)
     while True:
         last_step = step == num_iterations
 
@@ -275,9 +302,13 @@ def main():
             eval_steps = max(1, eval_tokens // (cfg.device_batch_size * cfg.model.sequence_len))
             val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
             print0(f"Step {step:05d} | Validation bpb: {val_bpb:.6f}")
+            health = value_health_stats(orig_model)
+            if health:
+                print0("Step {:05d} | VE health: ".format(step) + " ".join(
+                    f"{k.split('/')[-1]}={v:.4f}" for k, v in health.items()))
             if val_bpb < min_val_bpb:
                 min_val_bpb = val_bpb
-            logger.log(step=step, val_bpb=val_bpb)
+            logger.log(step=step, val_bpb=val_bpb, **health)
             model.train()
 
         if cfg.sample_every > 0 and (last_step or (step > 0 and step % cfg.sample_every == 0)):

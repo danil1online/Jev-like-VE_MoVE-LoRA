@@ -102,10 +102,19 @@ def resolve_move(move_cfg, model_cfg) -> ResolvedMove:
 
     # lave
     slots = move_cfg.lave_slots if move_cfg.lave_slots > 0 else 1
-    if move_cfg.lave_layers == "all":
-        layers = tuple(range(model_cfg.n_layer))
+    ll = move_cfg.lave_layers
+    n_layer = model_cfg.n_layer
+    if ll == "all":
+        layers = tuple(range(n_layer))
+    elif ll == "deep":
+        # deepest half of the layers (e.g. 6..11 for d12), per nanochat discussion #463
+        layers = tuple(range(n_layer // 2, n_layer))
+    elif isinstance(ll, (list, tuple)):
+        layers = tuple(sorted(set(int(i) for i in ll)))
+        assert layers and min(layers) >= 0 and max(layers) < n_layer, \
+            f"lave_layers {tuple(ll)} out of range for n_layer={n_layer}"
     else:  # "alt": same pattern as nanochat value_embeds (L-1, L-3, ...)
-        layers = tuple(i for i in range(model_cfg.n_layer) if i % 2 == (model_cfg.n_layer - 1) % 2)
+        layers = tuple(i for i in range(n_layer) if i % 2 == (n_layer - 1) % 2)
     return ResolvedMove(mode="lave", num_slots=slots, gate_scale=move_cfg.gate_scale,
                         gate_in_dim=gate_in_dim, gated_standard=gated_standard,
                         lave_layer_indices=layers)

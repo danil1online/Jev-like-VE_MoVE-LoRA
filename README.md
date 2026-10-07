@@ -34,13 +34,15 @@ jevelike/
   jev.py            JevAdapter, JevRenderer, answer_probs, calibration metrics
   data/
     prep.py         ruwiki -> parquet shards (train/val)
-    contrastive.py  NOUL contrastive generation via OpenAI-compatible API
+    prep_hf.py      prepare-hf: HF parquet datasets (e.g. FineWeb-Edu) -> shards
+    contrastive.py  NOUL contrastive generation via OpenAI-compatible API (--lang ru|en)
   train/
     base.py         base-train / base-eval
+    eval_facts.py   eval-facts (fact-bpb + entity-cloze probe for base checkpoints)
     jev_lora.py     jev-train / jev-eval
     jev_ask.py      jev-ask (System One inference: text + question -> answer + p)
-    tokenizer.py    tok-train
-configs/            base_d12_off / base_d12_move / base_d12_lave / base_d20_move / jev_lora_d12
+    tokenizer.py    tok-train (--lang ru|en|both, candidate single-token check)
+configs/            base_d12_* (+ *_en arms), jev_lora_d12*, docs/experiments.md (run plan)
 tests/              pytest suite (CPU, tiny models)
 ```
 
@@ -68,8 +70,8 @@ uv pip install --python .venv/bin/python --reinstall-package torch \
 > these files on this machine; reinstalling torch via uv keeps them working.
 
 The tools are exposed as console scripts (`base-train`, `base-eval`,
-`jev-train`, `jev-eval`, `jev-ask`, `tok-train`, `prepare-ruwiki`,
-`make-contrastive`) via `[project.scripts]`. They require the project to be installed once:
+`jev-train`, `jev-eval`, `jev-ask`, `eval-facts`, `tok-train`, `prepare-ruwiki`,
+`prepare-hf`, `make-contrastive`) via `[project.scripts]`. They require the project to be installed once:
 
 ```bash
 uv pip install -e .        # from the repo root, inside the venv

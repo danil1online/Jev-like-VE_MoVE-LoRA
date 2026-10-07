@@ -156,14 +156,14 @@ class JsonlLogger:
 # Downloads
 # -----------------------------------------------------------------------------
 
-def download_file(url, dest, chunk_size=1024 * 1024):
+def download_file(url, dest, chunk_size=1024 * 1024, headers=None):
     """Stream a file from `url` to `dest` with a file lock and resume support."""
     os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
     lock_path = dest + ".lock"
     with open(lock_path, "w") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         try:
-            headers = {}
+            headers = dict(headers or {})
             resume_pos = 0
             if os.path.exists(dest):
                 resume_pos = os.path.getsize(dest)

@@ -1,0 +1,43 @@
+# D12 + MoVE x4: one shared (vocab x 24 x kv_dim) bank — English arm D. ~+1.2B bank params.
+# Biggest VRAM of the grid (bank AdamW state ~10GB): smoke-test before the full run,
+# drop device_batch_size to 4 if it OOMs (gradient accumulation adjusts).
+# Usage: base-train --config configs/base_d12_move_x4_en.yaml
+model_tag: d12_move_x4_en
+
+model:
+  sequence_len: 2048
+  vocab_size: 65536        # overwritten from the tokenizer at startup
+  n_layer: 12
+  n_head: 6
+  n_kv_head: 6
+  n_embd: 768
+  window_pattern: SSSL
+  softcap: 15.0
+
+move:
+  mode: move
+  num_slots: 24            # M = 4 x (n_layer / 2) ("x4" in the MoVE paper)
+  gate_input: full
+  gate_scale: 2.0
+  gated_standard: true
+
+seed: 42
+max_steps: 4768            # ~2.5B tokens at batch 524288 (matched across arms)
+warmup_steps: 40
+warmdown_ratio: 0.65
+final_lr_frac: 0.05
+resume_from_step: 0
+save_every: 500
+eval_every: 250
+sample_every: 0
+
+device_batch_size: 8       # smaller micro-batch for the big bank
+total_batch_size: 524288   # explicit: auto (-1) would scale with value-bank params
+
+matrix_lr: 0.02
+unembedding_lr: 0.004
+embedding_lr: 0.2
+scalar_lr: 0.5
+move_gate_lr: 0.005
+weight_decay: 0.28
+grad_clip: 1.0

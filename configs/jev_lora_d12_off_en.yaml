@@ -1,0 +1,39 @@
+# Jev-Like LoRA adapter (English) on top of the frozen D12 CONTROL base (no VE).
+# Same recipe as configs/jev_lora_d12_move_en.yaml — only the base differs (H3 test).
+# Prereqs:
+#   base-train --config configs/base_d12_off_en.yaml
+#   make-contrastive --input facts_src.jsonl --output data/jev_en --lang en
+# Usage:
+#   jev-train --config configs/jev_lora_d12_off_en.yaml
+#   jev-eval  --config configs/jev_lora_d12_off_en.yaml
+model_tag: d12_off_en
+
+jev_base_checkpoint: checkpoints/d12_off_en
+jev_data_dir: data/jev_en
+
+lora:
+  rank: 16
+  alpha: 32.0
+  dropout: 0.0
+  target_modules: [q, k, v]
+
+jev:
+  yes_token: "yes"
+  no_token: "no"
+  letter_tokens: "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+  digit_tokens: "0123456789"
+  max_ctx_len: 1024
+  max_q_len: 256
+  max_examples_len: 1280
+  ece_bins: 15
+
+seed: 42
+resume_from_step: 0
+jev_num_iterations: 3000
+jev_warmup: 0.02
+jev_final_lr_frac: 0.1
+jev_batch_size: 16
+jev_lr: 1.0e-4
+jev_weight_decay: 0.0
+jev_eval_every: 200
+jev_save_every: 1000

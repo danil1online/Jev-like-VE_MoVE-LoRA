@@ -24,11 +24,13 @@ dev = [
 [project.scripts]
 base-train = "jevelike.train.base:main"
 base-eval = "jevelike.train.base:eval_main"
+eval-facts = "jevelike.train.eval_facts:main"
 jev-train = "jevelike.train.jev_lora:main"
 jev-eval = "jevelike.train.jev_lora:eval_main"
 jev-ask = "jevelike.train.jev_ask:main"
 tok-train = "jevelike.train.tokenizer:main"
 prepare-ruwiki = "jevelike.data.prep:main"
+prepare-hf = "jevelike.data.prep_hf:main"
 make-contrastive = "jevelike.data.contrastive:main"
 
 [tool.pytest.ini_options]

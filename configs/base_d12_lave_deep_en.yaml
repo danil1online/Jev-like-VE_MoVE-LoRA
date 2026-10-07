@@ -1,0 +1,43 @@
+# D12 + LaVE on the DEEPEST half of the layers (6..11) — English arm E (hypothesis H2,
+# nanochat discussion #463: VEs help most in deep layers). Same recipe as base_d12_lave_en.
+# Usage: base-train --config configs/base_d12_lave_deep_en.yaml
+model_tag: d12_lave_deep_en
+
+model:
+  sequence_len: 2048
+  vocab_size: 65536        # overwritten from the tokenizer at startup
+  n_layer: 12
+  n_head: 6
+  n_kv_head: 6
+  n_embd: 768
+  window_pattern: SSSL
+  softcap: 15.0
+
+move:
+  mode: lave
+  lave_slots: 1
+  lave_layers: deep        # layers 6..11 for d12
+  gate_input: full
+  gate_scale: 2.0
+  gated_standard: false
+
+seed: 42
+max_steps: 4768            # ~2.5B tokens at batch 524288 (matched across arms)
+warmup_steps: 40
+warmdown_ratio: 0.65
+final_lr_frac: 0.05
+resume_from_step: 0
+save_every: 500
+eval_every: 250
+sample_every: 0
+
+device_batch_size: 16
+total_batch_size: 524288   # explicit: auto (-1) would scale with value-bank params
+
+matrix_lr: 0.02
+unembedding_lr: 0.004
+embedding_lr: 0.2
+scalar_lr: 0.5
+move_gate_lr: 0.005
+weight_decay: 0.28
+grad_clip: 1.0

@@ -8,6 +8,8 @@ fact. Each text yields two training rows:
     {"text": T, "question": true_statement,  "answer": "да",  "task": "noul", "pair_id": ...}
     {"text": T, "question": false_statement, "answer": "нет", "task": "noul", "pair_id": ...}
 
+With --lang en the prompts are English and the answer words are "yes"/"no".
+
 Input:  JSONL with {"text": ...} rows, or a plain .txt file (one text per line).
 Output: <output>/raw.jsonl (resumable, one row per source text), then a
         deterministic split into <output>/train.jsonl and <output>/val.jsonl;
@@ -31,26 +33,48 @@ API_BASE = os.environ.get("JEV_API_BASE", "http://localhost:8000/v1")
 API_KEY = os.environ.get("JEV_API_KEY", "")
 MODEL = os.environ.get("JEV_MODEL", "gpt-4o-mini")
 
-SYSTEM_PROMPT = (
-    'Ты — эксперт по анализу данных. Твоя задача — создавать контрастивные пары '
-    'утверждений для обучения классификатора "System One".'
-)
+SYSTEM_PROMPTS = {
+    "ru": (
+        'Ты — эксперт по анализу данных. Твоя задача — создавать контрастивные пары '
+        'утверждений для обучения классификатора "System One".'
+    ),
+    "en": (
+        'You are an expert data analyst. Your task is to create contrastive pairs of '
+        'statements for training a "System One" classifier.'
+    ),
+}
 
-USER_PROMPT_TEMPLATE = (
-    'Входной текст:\n"""\n{text}\n"""\n\n'
-    'Задание: Внимательно прочитай текст и сгенерируй строго в формате JSON:\n'
-    '1. "true_statement": Одно короткое и емкое утверждение на русском языке, '
-    'которое абсолютно истинно на основе текста.\n'
-    '2. "false_statement": Точно такое же утверждение, но в котором изменено '
-    'ровно ОДНО ключевое слово (сущность, число, действие), что делает его '
-    'абсолютно ложным на основе текста.\n\n'
-    'Формат ответа:\n'
-    '{{\n  "true_statement": "строка",\n  "false_statement": "строка"\n}}'
-)
+USER_PROMPT_TEMPLATES = {
+    "ru": (
+        'Входной текст:\n"""\n{text}\n"""\n\n'
+        'Задание: Внимательно прочитай текст и сгенерируй строго в формате JSON:\n'
+        '1. "true_statement": Одно короткое и емкое утверждение на русском языке, '
+        'которое абсолютно истинно на основе текста.\n'
+        '2. "false_statement": Точно такое же утверждение, но в котором изменено '
+        'ровно ОДНО ключевое слово (сущность, число, действие), что делает его '
+        'абсолютно ложным на основе текста.\n\n'
+        'Формат ответа:\n'
+        '{{\n  "true_statement": "строка",\n  "false_statement": "строка"\n}}'
+    ),
+    "en": (
+        'Input text:\n"""\n{text}\n"""\n\n'
+        'Task: Read the text carefully and produce strictly valid JSON:\n'
+        '1. "true_statement": One short, precise statement in English that is '
+        'absolutely true based on the text.\n'
+        '2. "false_statement": The exact same statement, but with exactly ONE key '
+        'word changed (entity, number, action), making it absolutely false based on '
+        'the text.\n\n'
+        'Answer format:\n'
+        '{{\n  "true_statement": "string",\n  "false_statement": "string"\n}}'
+    ),
+}
+
+# answer words per language (must match jev.yes_token/no_token of the training config)
+LANG_ANSWERS = {"ru": ("да", "нет"), "en": ("yes", "no")}
 
 
-def build_pair_prompt(text):
-    return SYSTEM_PROMPT, USER_PROMPT_TEMPLATE.format(text=text)
+def build_pair_prompt(text, lang="ru"):
+    return SYSTEM_PROMPTS[lang], USER_PROMPT_TEMPLATES[lang].format(text=text)
 
 
 def parse_pair_response(content):
@@ -85,13 +109,14 @@ def parse_pair_response(content):
     return {"true_statement": true_s, "false_statement": false_s}
 
 
-def pair_rows(text, pair, pair_id):
+def pair_rows(text, pair, pair_id, lang="ru"):
     """The two training rows for one contrastive pair (both share pair_id)."""
+    yes, no = LANG_ANSWERS[lang]
     return [
         {"text": text, "question": pair["true_statement"],
-         "answer": "да", "task": "noul", "pair_id": pair_id},
+         "answer": yes, "task": "noul", "pair_id": pair_id},
         {"text": text, "question": pair["false_statement"],
-         "answer": "нет", "task": "noul", "pair_id": pair_id},
+         "answer": no, "task": "noul", "pair_id": pair_id},
     ]
 
 
@@ -113,9 +138,9 @@ def split_rows(rows, val_frac, seed=42):
     return train, val
 
 
-def ask_llm_pair(text, max_retries=3, timeout=120, json_mode=True):
+def ask_llm_pair(text, max_retries=3, timeout=120, json_mode=True, lang="ru"):
     """Ask the LLM for a contrastive pair. Returns the pair dict or None."""
-    system, user = build_pair_prompt(text)
+    system, user = build_pair_prompt(text, lang)
     url = f"{API_BASE.rstrip('/')}/chat/completions"
     headers = {"Content-Type": "application/json"}
     if API_KEY:
@@ -134,7 +159,7 @@ def ask_llm_pair(text, max_retries=3, timeout=120, json_mode=True):
             r = requests.post(url, json=payload, headers=headers, timeout=timeout)
             if r.status_code == 400 and json_mode and attempt == 0:
                 # server does not support response_format: retry in plain mode
-                return ask_llm_pair(text, max_retries, timeout, json_mode=False)
+                return ask_llm_pair(text, max_retries, timeout, json_mode=False, lang=lang)
             r.raise_for_status()
             content = r.json()["choices"][0]["message"]["content"]
             pair = parse_pair_response(content)
@@ -177,6 +202,8 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--split-only", action="store_true",
                     help="skip the API; rebuild train/val from an existing raw.jsonl")
+    ap.add_argument("--lang", choices=("ru", "en"), default="ru",
+                    help='language of prompts and answer words ("да"/"нет" or "yes"/"no")')
     args = ap.parse_args()
 
     os.makedirs(args.output, exist_ok=True)
@@ -203,10 +230,11 @@ def main():
         n_ok, n_fail = 0, 0
         with open(raw_path, "a", encoding="utf-8") as out_f:
             def work(text):
-                pair = ask_llm_pair(text)
+                pair = ask_llm_pair(text, lang=args.lang)
                 if pair is None:
                     return None
-                row = {"text": text, "pair": pair, "pair_id": make_pair_id(text)}
+                row = {"text": text, "pair": pair, "pair_id": make_pair_id(text),
+                       "lang": args.lang}
                 with lock:
                     out_f.write(json.dumps(row, ensure_ascii=False) + "\n")
                     out_f.flush()
@@ -233,7 +261,7 @@ def main():
                     raw.append(json.loads(line))
     rows = []
     for r in raw:
-        rows.extend(pair_rows(r["text"], r["pair"], r["pair_id"]))
+        rows.extend(pair_rows(r["text"], r["pair"], r["pair_id"], r.get("lang", "ru")))
     train, val = split_rows(rows, args.val_frac, seed=args.seed)
     for name, part in (("train", train), ("val", val)):
         path = os.path.join(args.output, f"{name}.jsonl")

@@ -39,6 +39,14 @@ def test_move_config_validate():
     with pytest.raises(AssertionError):
         MoveConfig(gate_input="half").validate()
     MoveConfig(mode="lave", lave_layers="all").validate()
+    MoveConfig(mode="lave", lave_layers="deep").validate()
+    MoveConfig(mode="lave", lave_layers=[6, 7, 8]).validate()
+    with pytest.raises(AssertionError):
+        MoveConfig(mode="lave", lave_layers="bogus").validate()
+    with pytest.raises(AssertionError):
+        MoveConfig(mode="lave", lave_layers=[]).validate()
+    with pytest.raises(AssertionError):
+        MoveConfig(mode="lave", lave_layers=[-1, 3]).validate()
 
 
 def test_resolve_move_off():
@@ -75,6 +83,17 @@ def test_resolve_move_lave():
     assert r.bank_params(65536, 768) == 6 * 65536 * 1 * 768
     r_all = resolve_move(MoveConfig(mode="lave", lave_layers="all"), m)
     assert r_all.lave_layer_indices == tuple(range(12))
+    # "deep": deepest half (6..11 for d12)
+    r_deep = resolve_move(MoveConfig(mode="lave", lave_layers="deep"), m)
+    assert r_deep.lave_layer_indices == (6, 7, 8, 9, 10, 11)
+    # explicit list: sorted, deduplicated
+    r_list = resolve_move(MoveConfig(mode="lave", lave_layers=[5, 3, 3, 9]), m)
+    assert r_list.lave_layer_indices == (3, 5, 9)
+    with pytest.raises(AssertionError):
+        resolve_move(MoveConfig(mode="lave", lave_layers=[0, 12]), m)
+    # odd n_layer: deep = range(n//2, n)
+    r_odd = resolve_move(MoveConfig(mode="lave", lave_layers="deep"), ModelConfig(n_layer=7))
+    assert r_odd.lave_layer_indices == (3, 4, 5, 6)
     r_gated = resolve_move(MoveConfig(mode="lave", gated_standard=True), m)
     assert r_gated.gate_out_dim(6) == 2 * 6
 

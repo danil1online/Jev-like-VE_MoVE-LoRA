@@ -15,6 +15,22 @@ def test_build_pair_prompt():
     assert "true_statement" in user and "false_statement" in user
 
 
+def test_build_pair_prompt_en():
+    system, user = build_pair_prompt("some text", lang="en")
+    assert "contrastive" in system.lower()
+    assert "some text" in user
+    assert "true_statement" in user and "false_statement" in user
+    # the JSON example braces must survive .format (regression guard)
+    assert '{\n  "true_statement"' in user
+
+
+def test_pair_rows_en():
+    pair = {"true_statement": "t", "false_statement": "f"}
+    rows = pair_rows("text", pair, "pid", lang="en")
+    assert rows[0]["answer"] == "yes" and rows[1]["answer"] == "no"
+    assert rows[0]["task"] == "noul" and rows[0]["pair_id"] == "pid"
+
+
 @pytest.mark.parametrize("raw,expected", [
     ('{"true_statement": "а", "false_statement": "б"}', {"true_statement": "а", "false_statement": "б"}),
     ('{"false_statement": "б", "true_statement": "а"}', {"true_statement": "а", "false_statement": "б"}),

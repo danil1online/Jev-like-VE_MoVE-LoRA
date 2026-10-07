@@ -9,7 +9,7 @@ import yaml
 
 VALID_MOVE_MODES = ("off", "lave", "move")
 VALID_GATE_INPUTS = ("full", "12")
-VALID_LAVE_LAYERS = ("alt", "all")
+VALID_LAVE_LAYERS = ("alt", "all", "deep")
 
 
 def _from_dict(dc_cls, raw):
@@ -91,7 +91,9 @@ class MoveConfig:
       whether the standard value path is also multiplied by a gate.
       None -> default per mode: True for "move" (paper), False for "lave".
     lave_layers:
-      which layers get a bank in "lave" mode: "alt" (L-1, L-3, ...) or "all".
+      which layers get a bank in "lave" mode: "alt" (L-1, L-3, ...), "all", or
+      "deep" (the deepest half of the layers, e.g. 6..11 for d12 -- nanochat
+      discussion #463). May also be an explicit list of layer indices, e.g. [6,7,8].
     """
     mode: str = "off"
     num_slots: int = -1
@@ -99,7 +101,7 @@ class MoveConfig:
     gate_scale: float = 2.0
     gate_input: str = "full"
     gated_standard: Optional[bool] = None
-    lave_layers: str = "alt"
+    lave_layers: "str | list" = "alt"
 
     @classmethod
     def from_dict(cls, raw):
@@ -108,7 +110,14 @@ class MoveConfig:
     def validate(self):
         assert self.mode in VALID_MOVE_MODES, f"mode must be one of {VALID_MOVE_MODES}, got {self.mode!r}"
         assert self.gate_input in VALID_GATE_INPUTS, f"gate_input must be one of {VALID_GATE_INPUTS}"
-        assert self.lave_layers in VALID_LAVE_LAYERS, f"lave_layers must be one of {VALID_LAVE_LAYERS}"
+        if isinstance(self.lave_layers, str):
+            assert self.lave_layers in VALID_LAVE_LAYERS, \
+                f"lave_layers must be one of {VALID_LAVE_LAYERS}, got {self.lave_layers!r}"
+        else:
+            assert isinstance(self.lave_layers, list) and self.lave_layers, \
+                "lave_layers must be a preset string or a non-empty list of layer indices"
+            assert all(isinstance(i, int) and i >= 0 for i in self.lave_layers), \
+                f"lave_layers list entries must be non-negative ints: {self.lave_layers}"
         assert self.gate_scale > 0
 
     def as_dict(self):
@@ -208,6 +217,7 @@ class TrainConfig:
     resume_from_step: int = 0
     save_every: int = 0
     eval_every: int = 250
+    eval_tokens: int = 4 * 2 ** 20   # val tokens per evaluation (~4.2M)
     sample_every: int = 0
 
     device_batch_size: int = 32

@@ -3,7 +3,7 @@ import torch
 
 from jevelike.move import MoveBank, mix_value, resolve_move
 from jevelike.configs import ModelConfig, MoveConfig
-from conftest import tiny_model_config
+from conftest import tiny_model_config, build_tiny
 
 torch.manual_seed(0)
 
@@ -29,6 +29,7 @@ def _manual_lave_mix(v, ve, z, scale, gated):
 
 def test_move_bank_shapes():
     bank = MoveBank(vocab_size=100, num_slots=3, kv_dim=16)
+    bank.init_weights()  # torch.empty leaves garbage bits (incl. NaN patterns)
     idx = torch.randint(0, 100, (4, 7))
     ve = bank(idx)
     assert ve.shape == (4, 7, 3, 16)
@@ -109,3 +110,17 @@ def test_resolve_move_gate_dims():
     assert rl.gate_out_dim(2) == 2      # 1 slot * H
     rlg = resolve_move(MoveConfig(mode="lave", gated_standard=True), m)
     assert rlg.gate_out_dim(2) == 4     # 2 slots * H
+
+
+def test_value_health_stats(fake_tokenizer, model_config):
+    from jevelike.train.base import value_health_stats
+    off = build_tiny(model_config, mode="off")
+    assert value_health_stats(off) == {}
+    mv = build_tiny(model_config, mode="move", num_slots=2)
+    s = value_health_stats(mv)
+    assert s["ve/bank_rows"] > 0 and s["ve/bank_norm_mean"] >= 0.0
+    assert 0.0 <= s["ve/bank_dead_frac"] <= 1.0
+    assert "ve/gate_norm_mean" in s and s["ve/gate_norm_max"] >= s["ve/gate_norm_mean"]
+    lv = build_tiny(model_config, mode="lave", lave_layers="deep")
+    sl = value_health_stats(lv)
+    assert sl["ve/bank_rows"] > 0 and "ve/gate_norm_mean" in sl

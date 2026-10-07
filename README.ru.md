@@ -34,13 +34,15 @@ jevelike/
   jev.py            JevAdapter, JevRenderer, answer_probs, метрики калибровки
   data/
     prep.py         ruwiki -> parquet-шарды (train/val)
-    contrastive.py  генерация NOUL-контрастива через OpenAI-совместимый API
+    prep_hf.py      prepare-hf: HF-parquet датасеты (напр. FineWeb-Edu) -> шарды
+    contrastive.py  генерация NOUL-контрастива через OpenAI-совместимый API (--lang ru|en)
   train/
     base.py         base-train / base-eval
+    eval_facts.py   eval-facts (fact-bpb + entity-cloze проба для базовых чекпоинтов)
     jev_lora.py     jev-train / jev-eval
     jev_ask.py      jev-ask (инференс System One: текст + вопрос -> ответ + p)
-    tokenizer.py    tok-train
-configs/            base_d12_off / base_d12_move / base_d12_lave / base_d20_move / jev_lora_d12
+    tokenizer.py    tok-train (--lang ru|en|both, проверка single-token кандидатов)
+configs/            base_d12_* (+ англ. рукава *_en), jev_lora_d12*; docs/experiments.md (план)
 tests/              pytest-сьют (CPU, крошечные модели)
 ```
 
@@ -69,8 +71,8 @@ uv pip install --python .venv/bin/python --reinstall-package torch \
 > переустановка torch через uv сохраняет их рабочими.
 
 Инструменты вынесены в консольные скрипты (`base-train`, `base-eval`,
-`jev-train`, `jev-eval`, `jev-ask`, `tok-train`, `prepare-ruwiki`,
-`make-contrastive`) через `[project.scripts]`. Для них проект нужно один раз установить:
+`jev-train`, `jev-eval`, `jev-ask`, `eval-facts`, `tok-train`, `prepare-ruwiki`,
+`prepare-hf`, `make-contrastive`) через `[project.scripts]`. Для них проект нужно один раз установить:
 
 ```bash
 uv pip install -e .        # из корня репо, внутри venv
