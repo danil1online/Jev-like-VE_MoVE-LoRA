@@ -1,19 +1,23 @@
 # Jev-like-VE / MoVE-LoRA
 
-Training a value-embedding (VE) / MoVE base model from scratch on
-`atBuba/ruwiki-dataset` (nanochat-style pipeline), plus a **Jev-Like-LoRA
-adapter** on top of a frozen base for typed decisions:
+Training a value-embedding (VE) / MoVE base model from scratch on fact-dense
+corpora — `atBuba/ruwiki-dataset` or HuggingFace parquet datasets such as
+FineWeb-Edu (`prepare-hf`) — with a nanochat-style pipeline, plus a
+**Jev-Like-LoRA adapter** on top of a frozen base for typed decisions:
 
-- **NOUL** — yes/no (`да` / `нет`) over a context + question
-- **choice** — single-letter answers (28 Cyrillic letters)
+- **NOUL** — yes/no over a context + question (answer words are configurable:
+  `да`/`нет` or `yes`/`no` via `jev.yes_token` / `jev.no_token`)
+- **choice** — single-letter answers (Cyrillic or Latin, `jev.letter_tokens`)
 - **score** — 0..9
 
 The adapter is a low-rank LoRA (q/k/v by default) plus learnable rows for the
 `<|ctx|>`, `<|q|>`, `<|a|>` special tokens and a candidate-restricted head
 (`extra_in` / `extra_out`), so inference is a single forward pass with
-`softmax` over the 40 answer candidates.
+`softmax` over the answer candidates.
 
-Design spec: `docs/gemini_talk.md`. MoVE reference: arXiv:2601.22887.
+Design spec: `docs/gemini_talk.md`. Experiment plan (matched-budget VE/MoVE
+grid, full commands for an RTX 3090): `docs/experiments.md`. MoVE reference:
+arXiv:2601.22887.
 
 ## Layout
 
@@ -84,9 +88,9 @@ simplest path.
 
 ## Pipeline
 
-1. **Prepare the corpus** (downloads `atBuba/ruwiki-dataset`, writes parquet
-   shards `<data>/ruwiki_train_0000.parquet`, ... + `ruwiki_val_*.parquet`;
-   the last shard is the val split):
+1. **Prepare the corpus** — parquet shards with a single `text` column, sorted
+   so the trailing shard(s) are the val split. Either ruwiki (small, good for
+   Cyrillic tokenizer coverage):
 
    ```bash
    prepare-ruwiki --num-shards 100 --seed 42
@@ -94,11 +98,25 @@ simplest path.
    # --no-download: fail instead of downloading when no --input given
    ```
 
+   or any HF parquet-hosted dataset (FineWeb-Edu etc.), with a resumable
+   download cache under `<data>/hf_cache` and a `VAL_SHA256.txt` manifest:
+
+   ```bash
+   prepare-hf --dataset HuggingFaceFW/fineweb-edu --subsample sample-10BT \
+       --max-tokens 4000000000 --num-shards 200
+   # HF_TOKEN for gated datasets; --skip-download re-shards the existing cache
+   ```
+
 2. **Train the tokenizer** (rustbpe BPE, 4 special tokens
-   `<|bos|> <|ctx|> <|q|> <|a|>`), saved to `<base>/tokenizer`:
+   `<|bos|> <|ctx|> <|q|> <|a|>`), saved to `<base>/tokenizer`. `--lang`
+   selects which Jev answer candidates must come out as single tokens
+   (hard check; `--allow-multi-token` downgrades it to a warning). For an
+   English base that should later take Russian questions, train bilingual:
 
    ```bash
    tok-train --vocab-size 65536 --max-chars 2000000000
+   # EN corpus + Cyrillic coverage (extra dirs are consumed first):
+   tok-train --lang both --extra-data-dir /path/to/ruwiki_shards
    ```
 
 3. **Pretrain the base model**:
@@ -108,24 +126,41 @@ simplest path.
    base-train --config configs/base_d12_move.yaml   # MoVE value embeddings
    base-train --config configs/base_d12_lave.yaml   # LaVE (per-layer values)
    base-train --config configs/base_d20_move.yaml   # bigger D20
+   # English matched-budget arms (docs/experiments.md):
+   #   base_d12_off_en / _lave_en / _move_x1_en / _move_x4_en / _lave_deep_en
    # --set key=value ... for overrides, --device-type cuda|cpu,
    # --data-dir DIR, --run-name NAME
    ```
 
    Checkpoints land in `checkpoints/<model_tag>/model_XXXXXX.pt` (+ meta,
    optimizer). `base-eval --model-tag d12_move --step 100000` reports val bpb.
+   Every eval also logs VE health (`ve/bank_norm_mean`, `ve/bank_dead_frac`,
+   `ve/gate_norm_*`) to `runs/<tag>/<run>/log.jsonl`; the val budget per eval
+   is `eval_tokens` (default ~4.2M).
+
+3b. **Fact-memory probe** (H1 in docs/experiments.md): build a small probe set
+    from the held-out val shards once, then score checkpoints on fact-bpb and
+    entity-cloze top-1 accuracy:
+
+   ```bash
+   eval-facts --build --data data/facts_eval.jsonl
+   eval-facts --model-tag d12_move_x1_en --steps 1000,4767 --data data/facts_eval.jsonl
+   ```
 
 4. **Build the Jev dataset** (LLM-as-Teacher contrastive pairs, resumable;
    needs an OpenAI-compatible API, env `JEV_API_BASE` / `JEV_API_KEY` /
    `JEV_MODEL`). Input: JSONL `{"text": ...}` rows or a plain `.txt` file
    (one text per line). For each text the LLM produces a `true_statement` and
    a `false_statement` that differs in exactly one fact, yielding two rows
-   (answer `да` / `нет`) that share a `pair_id`. Output: `<output>/raw.jsonl`
-   (resumable) plus a deterministic split into `train.jsonl` / `val.jsonl`
-   where both rows of a pair always land in the same split:
+   (answer `да`/`нет`, or `yes`/`no` with `--lang en`) that share a `pair_id`.
+   Output: `<output>/raw.jsonl` (resumable) plus a deterministic split into
+   `train.jsonl` / `val.jsonl` where both rows of a pair always land in the
+   same split:
 
    ```bash
    make-contrastive --input texts.jsonl --output data/jev --val-frac 0.1
+   # English pairs (yes/no):
+   make-contrastive --input texts.jsonl --output data/jev_en --lang en
    # re-split from an existing raw.jsonl without API calls:
    make-contrastive --input texts.jsonl --output data/jev --split-only
    ```
@@ -172,20 +207,22 @@ simplest path.
 | `move.mode` | `"off"`, `"move"`, `"lave"` |
 | `move.num_slots` | MoVE slots per layer (auto = `n_layer // 2`) |
 | `move.gated_standard` | gate the standard V alongside MoVE slots (MoVE only) |
-| `move.lave_layers` | `"alt"` (every other layer) or `"all"` (LaVE) |
+| `move.lave_layers` | `"alt"` (every other layer), `"all"`, `"deep"` (deepest half, e.g. 6..11 for d12), or an explicit list `[6,7,8]` (LaVE) |
 | `lora.rank/alpha/target_modules` | `q,k,v,proj,fc,mlp_proj` |
 | `jev.letter_tokens` | 28 letters `АБВГДЕЖЗИКЛМНОПРСТУФХЦЧШЩЭЮЯ` (no Й/Ё/Ъ/Ы/Ь) |
-| `total_batch_size: -1` | auto = `target_param_data_ratio` x params (12x) |
+| `total_batch_size: -1` | auto = `target_param_data_ratio` x scaling params (12x); set it explicitly in the matched-budget `*_en` arms so value-bank size does not shift the batch |
+| `eval_tokens` | val tokens per evaluation during base-train (default ~4.2M) |
 
-Answer candidate layout (40 total): `[0:2]` да/нет, `[2:30]` letters,
-`[30:40]` digits.
+Answer candidate layout (default RU config, 40 total): `[0:2]` да/нет,
+`[2:30]` letters, `[30:40]` digits. English configs (`*_en`) use `yes`/`no` +
+A–Z (38 total); the layout is always `[yes,no] + letters + digits`.
 
 ## Tests
 
 CPU-only, tiny models, no data downloads:
 
 ```bash
-.venv/bin/python -m pytest tests/ -q        # 67 tests
+.venv/bin/python -m pytest tests/ -q        # 90 tests
 .venv/bin/python -m pytest tests/ -m "not slow"
 ```
 
@@ -200,11 +237,12 @@ ids are exact) and a real small rustbpe tokenizer for roundtrip tests.
   layers (alt/all), cheaper than MoVE.
 - **JevAdapter**: base forward is untouched except (a) LoRA deltas on q/k/v,
   (b) `extra_in` rows swapped in for `<|ctx|>/<|q|>/<|a|>`, (c) `extra_out`
-  head producing logits for the 40 candidates. At init the adapter is
+  head producing logits for the answer candidates (40 with the default RU
+  config). At init the adapter is
   (numerically) identity: `extra_out` copies `lm_head` rows and LoRA `B = 0`.
 - Attention is BTHD; logits are softcapped; `lm_head` init std 0.001 (not tied
   to the token embedding).
-- **Per-task probabilities**: `adapter.probs` is a softmax over all 40
+- **Per-task probabilities**: `adapter.probs` is a softmax over all answer
   candidates; per-task probabilities (metrics, `jev-ask`) are the restricted
   softmax over that task's slice, followed by the post-hoc temperature from
   `calibration.json` (`calibrate_probs` / `fit_temperature` in `jev.py`).

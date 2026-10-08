@@ -1,19 +1,23 @@
 # Jev-like-VE / MoVE-LoRA
 
-Обучение базовой модели с value-эмбеддингами (VE) / MoVE с нуля на
-`atBuba/ruwiki-dataset` (pipeline в стиле nanochat), плюс **Jev-Like-LoRA
-адаптер** поверх замороженной базы для типизированных решений:
+Обучение базовой модели с value-эмбеддингами (VE) / MoVE с нуля на корпусах с
+высокой плотностью фактов — `atBuba/ruwiki-dataset` или HF-parquet датасеты
+вроде FineWeb-Edu (`prepare-hf`) — по pipeline в стиле nanochat, плюс
+**Jev-Like-LoRA адаптер** поверх замороженной базы для типизированных решений:
 
-- **NOUL** — да/нет (`да` / `нет`) по контексту + вопросу
-- **choice** — ответы одной буквой (28 букв кириллицы)
+- **NOUL** — да/нет по контексту + вопросу (слова ответов настраиваются:
+  `да`/`нет` или `yes`/`no` через `jev.yes_token` / `jev.no_token`)
+- **choice** — ответы одной буквой (кириллица или латиница, `jev.letter_tokens`)
 - **score** — 0..9
 
 Адаптер — это low-rank LoRA (по умолчанию q/k/v) плюс обучаемые строки для
 специальных токенов `<|ctx|>`, `<|q|>`, `<|a|>` и заголовок, ограниченный
 кандидатами (`extra_in` / `extra_out`), поэтому инференс — это один forward
-pass с `softmax` по 40 кандидатам ответа.
+pass с `softmax` по кандидатам ответа.
 
-Спецификация: `docs/gemini_talk.md`. Ссылка по MoVE: arXiv:2601.22887.
+Спецификация: `docs/gemini_talk.md`. План экспериментов (сетка VE/MoVE с
+равными бюджетами, команды для RTX 3090): `docs/experiments.md`. Ссылка по
+MoVE: arXiv:2601.22887.
 
 ## Структура
 
@@ -85,9 +89,9 @@ uv pip install -e .        # из корня репо, внутри venv
 
 ## Pipeline
 
-1. **Подготовка корпуса** (скачивает `atBuba/ruwiki-dataset`, пишет
-   parquet-шарды `<data>/ruwiki_train_0000.parquet`, ... +
-   `ruwiki_val_*.parquet`; последний шард — val-сплит):
+1. **Подготовка корпуса** — parquet-шарды с одной колонкой `text`, в sorted
+   порядке хвостовые шарды — val-сплит. Либо ruwiki (маленький, хорош для
+   покрытия кириллицы в токенизаторе):
 
    ```bash
    prepare-ruwiki --num-shards 100 --seed 42
@@ -95,11 +99,25 @@ uv pip install -e .        # из корня репо, внутри venv
    # --no-download: ошибка вместо скачивания, если --input не задан
    ```
 
+   либо любой HF-parquet датасет (FineWeb-Edu и т.п.) с возобновляемым кэшем
+   скачивания в `<data>/hf_cache` и манифестом `VAL_SHA256.txt`:
+
+   ```bash
+   prepare-hf --dataset HuggingFaceFW/fineweb-edu --subsample sample-10BT \
+       --max-tokens 4000000000 --num-shards 200
+   # HF_TOKEN для gated-датасетов; --skip-download перешардирует готовый кэш
+   ```
+
 2. **Обучение токенизатора** (rustbpe BPE, 4 специальных токена
-   `<|bos|> <|ctx|> <|q|> <|a|>`), сохраняется в `<base>/tokenizer`:
+   `<|bos|> <|ctx|> <|q|> <|a|>`), сохраняется в `<base>/tokenizer`. `--lang`
+   задаёт, какие кандидаты Jev обязаны быть single-token (жёсткая проверка;
+   `--allow-multi-token` ослабляет до предупреждения). Для англ. базы, к которой
+   позже захотят задавать русские вопросы, учим двуязычно:
 
    ```bash
    tok-train --vocab-size 65536 --max-chars 2000000000
+   # англ. корпус + покрытие кириллицы (extra-каталоги читаются первыми):
+   tok-train --lang both --extra-data-dir /path/to/ruwiki_shards
    ```
 
 3. **Предобучение базовой модели**:
@@ -109,25 +127,40 @@ uv pip install -e .        # из корня репо, внутри venv
    base-train --config configs/base_d12_move.yaml   # MoVE value-эмбеддинги
    base-train --config configs/base_d12_lave.yaml   # LaVE (per-layer значения)
    base-train --config configs/base_d20_move.yaml   # большая D20
+   # англ. рукава с равным бюджетом (docs/experiments.md):
+   #   base_d12_off_en / _lave_en / _move_x1_en / _move_x4_en / _lave_deep_en
    # --set key=value ... для переопределений, --device-type cuda|cpu,
    # --data-dir DIR, --run-name NAME
    ```
 
-   Чекпоинты складываются в `checkpoints/<model_tag>/model_XXXXXX.pt`
-   (+ meta, optimizer). `base-eval --model-tag d12_move --step 100000`
-   выдаёт val bpb.
+    Чекпоинты складываются в `checkpoints/<model_tag>/model_XXXXXX.pt`
+    (+ meta, optimizer). `base-eval --model-tag d12_move --step 100000`
+    выдаёт val bpb. Каждый eval также пишет health VE (`ve/bank_norm_mean`,
+    `ve/bank_dead_frac`, `ve/gate_norm_*`) в `runs/<tag>/<run>/log.jsonl`;
+    бюджет val на один eval задаётся ключом `eval_tokens` (по умолчанию ~4.2M).
+
+3b. **Проба фактной памяти** (H1 в docs/experiments.md): один раз собрать
+    пробный набор из held-out val-шардов, затем оценивать чекпоинты по fact-bpb
+    и entity-cloze top-1:
+
+   ```bash
+   eval-facts --build --data data/facts_eval.jsonl
+   eval-facts --model-tag d12_move_x1_en --steps 1000,4767 --data data/facts_eval.jsonl
+   ```
 
 4. **Сборка Jev-датасета** (LLM-as-Teacher, контрастивные пары, возобновляемо;
    нужен OpenAI-совместимый API, env `JEV_API_BASE` / `JEV_API_KEY` /
    `JEV_MODEL`). Вход: JSONL-строки `{"text": ...}` или обычный `.txt` файл
    (один текст на строку). Для каждого текста LLM выдаёт `true_statement` и
    `false_statement`, отличающееся ровно одним фактом; получается две строки
-   (ответ `да` / `нет`) с общим `pair_id`. Выход: `<output>/raw.jsonl`
-   (возобновляемый) плюс детерминированное разбиение на `train.jsonl` /
-   `val.jsonl`, где обе строки пары всегда попадают в один сплит:
+   (ответ `да`/`нет`, или `yes`/`no` с `--lang en`) с общим `pair_id`. Выход:
+   `<output>/raw.jsonl` (возобновляемый) плюс детерминированное разбиение на
+   `train.jsonl` / `val.jsonl`, где обе строки пары всегда попадают в один сплит:
 
    ```bash
    make-contrastive --input texts.jsonl --output data/jev --val-frac 0.1
+   # английские пары (yes/no):
+   make-contrastive --input texts.jsonl --output data/jev_en --lang en
    # пере-разбить из готового raw.jsonl без вызовов API:
    make-contrastive --input texts.jsonl --output data/jev --split-only
    ```
@@ -174,20 +207,22 @@ uv pip install -e .        # из корня репо, внутри venv
 | `move.mode` | `"off"`, `"move"`, `"lave"` |
 | `move.num_slots` | слоты MoVE на слой (auto = `n_layer // 2`) |
 | `move.gated_standard` | гейтить стандартный V рядом со слотами MoVE (только MoVE) |
-| `move.lave_layers` | `"alt"` (через слой) или `"all"` (LaVE) |
+| `move.lave_layers` | `"alt"` (через слой), `"all"`, `"deep"` (глубокая половина, напр. 6..11 для d12) или явный список `[6,7,8]` (LaVE) |
 | `lora.rank/alpha/target_modules` | `q,k,v,proj,fc,mlp_proj` |
 | `jev.letter_tokens` | 28 букв `АБВГДЕЖЗИКЛМНОПРСТУФХЦЧШЩЭЮЯ` (без Й/Ё/Ъ/Ы/Ь) |
-| `total_batch_size: -1` | auto = `target_param_data_ratio` x параметры (12x) |
+| `total_batch_size: -1` | auto = `target_param_data_ratio` x scaling-параметры (12x); в рукавах с равным бюджетом `*_en` задан явно, чтобы размер банка не сдвигал batch |
+| `eval_tokens` | val-токены на один eval во время base-train (по умолчанию ~4.2M) |
 
-Раскладка кандидатов ответа (всего 40): `[0:2]` да/нет, `[2:30]` буквы,
-`[30:40]` цифры.
+Раскладка кандидатов ответа (дефолтный RU-конфиг, всего 40): `[0:2]` да/нет,
+`[2:30]` буквы, `[30:40]` цифры. В англ. конфигах (`*_en`) — `yes`/`no` + A–Z
+(всего 38); раскладка всегда `[yes,no] + буквы + цифры`.
 
 ## Тесты
 
 Только CPU, крошечные модели, без скачивания данных:
 
 ```bash
-.venv/bin/python -m pytest tests/ -q        # 67 тестов
+.venv/bin/python -m pytest tests/ -q        # 90 тестов
 .venv/bin/python -m pytest tests/ -m "not slow"
 ```
 
@@ -203,12 +238,13 @@ roundtrip-тестов.
   `V = V + g ⊙ M_1` на выбранных слоях (alt/all), дешевле MoVE.
 - **JevAdapter**: базовый forward не трогают, кроме (a) LoRA-дельт на q/k/v,
   (b) подмены строк `extra_in` для `<|ctx|>/<|q|>/<|a|>`, (c) заголовка
-  `extra_out`, выдающего логиты для 40 кандидатов. При инициализации адаптер
+  `extra_out`, выдающего логиты для кандидатов ответа (40 при дефолтном
+  RU-конфиге). При инициализации адаптер
   (численно) тождественен: `extra_out` копирует строки `lm_head`, LoRA `B = 0`.
 - Внимания в BTHD; логиты softcapped; init std `lm_head` = 0.001 (не связан
   с токеновским эмбеддингом).
-- **Вероятности по задачам**: `adapter.probs` — softmax по всем 40
-  кандидатам; per-task вероятности (метрики, `jev-ask`) — restricted softmax
+- **Вероятности по задачам**: `adapter.probs` — softmax по всем кандидатам
+  ответа; per-task вероятности (метрики, `jev-ask`) — restricted softmax
   по слайсу задачи, затем post-hoc температура из `calibration.json`
   (`calibrate_probs` / `fit_temperature` в `jev.py`).
 - Порядок слияний rustbpe на маленьких корпусах нельзя контролировать по
