@@ -59,10 +59,6 @@ Python >= 3.10, [uv](https://docs.astral.sh/uv/).
 uv sync --extra cpu --group dev
 # GPU (CUDA 12.8)
 uv sync --extra gpu --group dev
-
-# CPU torch (для свежего venv): uv выбирает индекс через [tool.uv.sources]
-uv pip install --python .venv/bin/python --reinstall-package torch \
-    --index-url https://download.pytorch.org/whl/cpu "torch==2.14.1+cpu"
 ```
 
 > **Заметка о preload torch.** Если `LD_LIBRARY_PATH` машины содержит устаревший

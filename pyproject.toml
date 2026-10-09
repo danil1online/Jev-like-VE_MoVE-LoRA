@@ -13,7 +13,6 @@ dependencies = [
     "requests>=2.32.0",
     "rustbpe>=0.1.0",
     "tiktoken>=0.11.0",
-    "torch>=2.4.0",
 ]
 
 [dependency-groups]
@@ -61,9 +60,11 @@ explicit = true
 
 [project.optional-dependencies]
 cpu = [
-    "setuptools>=65.0.0",
+    "torch>=2.4.0",
 ]
-gpu = []
+gpu = [
+    "torch>=2.4.0",
+]
 
 [tool.uv]
 default-groups = []
