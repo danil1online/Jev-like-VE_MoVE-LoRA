@@ -47,12 +47,20 @@ def parse_args():
 
 def apply_overrides(cfg, pairs):
     for pair in pairs:
-        key, _, value = pair.partition("=")
-        value = json.loads(value)
+        key, _, raw = pair.partition("=")
         node = cfg
         parts = key.split(".")
         for part in parts[:-1]:
             node = getattr(node, part)
+        old = getattr(node, parts[-1])
+        try:
+            value = json.loads(raw)  # ints/floats/bools/quoted strings
+        except json.JSONDecodeError:
+            value = raw
+        if isinstance(old, str) and not isinstance(value, str):
+            value = raw  # string field: keep the raw text (e.g. digit tokens "23456789")
+        elif isinstance(old, bool) and not isinstance(value, bool):
+            value = value == "true" or value is True
         setattr(node, parts[-1], value)
 
 
@@ -214,7 +222,11 @@ def main():
     train_rendered = render_cache(adapter.renderer, train_items, "train_cache.pt")
     val_rendered = render_cache(adapter.renderer, val_items, "val_cache.pt")
 
-    # resume
+    # optimizer: single AdamW group over all trainable adapter params
+    optimizer = torch.optim.AdamW(adapter.trainable_params(), lr=cfg.jev_lr,
+                                  betas=(0.8, 0.95), weight_decay=cfg.jev_weight_decay)
+
+    # resume (adapter weights + optimizer moments; old checkpoints have no optim state)
     resume_step = cfg.resume_from_step
     if resume_step > 0:
         adapter_path = os.path.join(run_dir, f"adapter_{resume_step:06d}.pt")
@@ -222,15 +234,13 @@ def main():
             adapter_path = os.path.join(get_base_dir(), "jev_checkpoints", cfg.model_tag,
                                         f"adapter_{resume_step:06d}.pt")
         if os.path.exists(adapter_path):
-            adapter_state, step, a_meta = load_adapter(adapter_path, device)
+            adapter_state, step, a_meta, optim_state = load_adapter(adapter_path, device)
             adapter.load_adapter_state(adapter_state)
+            if optim_state is not None:
+                optimizer.load_state_dict(optim_state)
             check_adapter_meta(a_meta, cfg, adapter_path)
             adapter.train()
             print0(f"Resumed adapter from {adapter_path} step {step}")
-
-    # optimizer: single AdamW group over all trainable adapter params
-    optimizer = torch.optim.AdamW(adapter.trainable_params(), lr=cfg.jev_lr,
-                                  betas=(0.8, 0.95), weight_decay=cfg.jev_weight_decay)
 
     num_iterations = cfg.jev_num_iterations
     warmup_iters = max(1, int(round(cfg.jev_warmup * num_iterations)))
@@ -287,6 +297,7 @@ def main():
             out_dir = os.path.join(get_base_dir(), "jev_checkpoints", cfg.model_tag)
             save_adapter(os.path.join(out_dir, f"adapter_{step:06d}.pt"), step,
                          adapter.adapter_state_dict(),
+                         optim_state=optimizer.state_dict(),
                          meta_data={
                              "base_checkpoint": cfg.jev_base_checkpoint,
                              "base_meta": {k: meta_data[k] for k in ("model_config", "move_config") if k in meta_data},
@@ -345,7 +356,7 @@ def eval_main():
         best = max(files, key=lambda f: int(f.split("_")[-1].split(".")[0]))
         adapter_path = os.path.join(adapter_dir, best)
     print0(f"Loading adapter from {adapter_path}")
-    adapter_state, step, a_meta = load_adapter(adapter_path, device)
+    adapter_state, step, a_meta, _ = load_adapter(adapter_path, device)
     adapter.load_adapter_state(adapter_state)
     check_adapter_meta(a_meta, cfg, adapter_path)
     adapter.eval()

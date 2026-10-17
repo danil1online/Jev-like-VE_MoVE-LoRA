@@ -1,4 +1,4 @@
-# D20 + MoVE (bigger model): 20 layers, d=1280, M = n_layer (auto, "x2" variant).
+# D20 + MoVE (bigger model): 20 layers, d=1280, M = n_layer//2 = 10 (auto, "x1" variant).
 # Usage: base-train --config configs/base_d20_move.yaml
 model_tag: d20_move
 
@@ -14,7 +14,7 @@ model:
 
 move:
   mode: move
-  num_slots: -1            # auto: n_layer = 20
+  num_slots: -1            # auto: n_layer // 2 = 10 ("x1")
   gate_input: full
   gate_scale: 2.0
   gated_standard: true

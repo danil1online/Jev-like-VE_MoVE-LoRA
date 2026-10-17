@@ -11,8 +11,9 @@ CONFIGS_DIR = os.path.join(os.path.dirname(__file__), "..", "configs")
 
 
 def test_repo_configs_load():
-    names = ["base_d12_off.yaml", "base_d12_move.yaml", "base_d12_lave.yaml",
-             "base_d20_move.yaml", "jev_lora_d12.yaml"]
+    # every config in the repo must load and validate (catches typos in new arms)
+    names = sorted(f for f in os.listdir(CONFIGS_DIR) if f.endswith((".yaml", ".yml")))
+    assert len(names) >= 12, f"expected at least 12 configs in {CONFIGS_DIR}, got {names}"
     for name in names:
         cfg = load_config(os.path.join(CONFIGS_DIR, name))
         cfg.validate()
@@ -47,6 +48,10 @@ def test_move_config_validate():
         MoveConfig(mode="lave", lave_layers=[]).validate()
     with pytest.raises(AssertionError):
         MoveConfig(mode="lave", lave_layers=[-1, 3]).validate()
+    # lave supports a single slot per layer only (forward crashes otherwise)
+    MoveConfig(mode="lave", lave_slots=1).validate()
+    with pytest.raises(AssertionError):
+        MoveConfig(mode="lave", lave_slots=2).validate()
 
 
 def test_resolve_move_off():

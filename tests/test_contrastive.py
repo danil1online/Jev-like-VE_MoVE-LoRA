@@ -71,7 +71,9 @@ def test_split_rows_pairs_stay_together():
         rows.append({"pair_id": pid, "i": 1})
     train, val = split_rows(rows, val_frac=0.25, seed=7)
     assert len(train) + len(val) == len(rows)
-    assert len(val) == 10  # 5 pairs * 2 rows
+    n_val_pairs = len({r["pair_id"] for r in val})
+    # hash-based membership: ~25% of pairs on average (5 expected out of 20)
+    assert 2 <= n_val_pairs <= 13
     train_pids = {r["pair_id"] for r in train}
     val_pids = {r["pair_id"] for r in val}
     assert not train_pids & val_pids
@@ -81,12 +83,23 @@ def test_split_rows_pairs_stay_together():
 
 
 def test_split_rows_deterministic():
-    rows = [{"pair_id": i, "i": j} for i in range(10) for j in range(2)]
+    rows = [{"pair_id": f"p{i}", "i": j} for i in range(200) for j in range(2)]
     t1, v1 = split_rows(rows, 0.3, seed=42)
     t2, v2 = split_rows(rows, 0.3, seed=42)
     t3, v3 = split_rows(rows, 0.3, seed=43)
     assert t1 == t2 and v1 == v2
-    assert t3 != t1  # different seed -> different assignment
+    # different seed -> different membership for at least one pair
+    assert {r["pair_id"] for r in v3} != {r["pair_id"] for r in v1}
+
+
+def test_split_rows_stable_under_appends():
+    """Membership of existing pairs must not change when new pairs are appended later."""
+    def rows_for(n):
+        return [{"pair_id": f"p{i}", "i": j} for i in range(n) for j in range(2)]
+    _, val_a = split_rows(rows_for(10), 0.3, seed=7)
+    _, val_b = split_rows(rows_for(15), 0.3, seed=7)
+    old_ids = {f"p{i}" for i in range(10)}
+    assert {r["pair_id"] for r in val_a} == ({r["pair_id"] for r in val_b} & old_ids)
 
 
 def test_split_rows_extremes():

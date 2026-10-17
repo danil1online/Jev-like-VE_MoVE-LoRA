@@ -46,10 +46,15 @@ class JevRenderer:
         return words, [self.word_to_cand[w] for w in words]
 
     def render_one(self, text: str, question: str, answer: str):
-        """Returns (ids, target_token_id). The answer is predicted at position len(ids)-1."""
+        """Returns (ids, target_token_id). The answer is predicted at position len(ids)-1.
+        Context/question are truncated to cfg.max_ctx_len / cfg.max_q_len tokens."""
         assert answer in self.word_to_cand, f"Answer {answer!r} is not a candidate word"
         text_ids = self.tokenizer.encode(text)
+        if len(text_ids) > self.cfg.max_ctx_len:
+            text_ids = text_ids[:self.cfg.max_ctx_len]
         q_ids = self.tokenizer.encode(question)
+        if len(q_ids) > self.cfg.max_q_len:
+            q_ids = q_ids[:self.cfg.max_q_len]
         ids = [self.bos_id, self.ctx_id] + text_ids + [self.q_id] + q_ids + [self.a_id]
         target = self.tokenizer.encode_single_token(answer)
         return ids, target
@@ -91,9 +96,8 @@ def jev_ce_loss(logits, labels, cand_ids, temperature: float = 1.0):
         logits = logits.index_select(-1, cand)
     logit_dtype = logits.dtype
     cand_tensor = torch.as_tensor(cand_ids, device=logits.device, dtype=torch.long)
-    target_idx = torch.full_like(labels, -1, dtype=torch.long)
-    for ci in range(K):
-        target_idx = torch.where(labels == cand_tensor[ci], torch.tensor(ci, device=labels.device), target_idx)
+    # label -> candidate index in one broadcast compare (non-matching rows get 0, masked out below)
+    target_idx = (labels.unsqueeze(-1) == cand_tensor).to(torch.long).argmax(dim=-1)
     valid = labels != IGNORE_INDEX
     if not valid.any():
         return logits.new_zeros(())

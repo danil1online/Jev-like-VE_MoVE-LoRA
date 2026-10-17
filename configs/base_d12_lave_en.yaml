@@ -32,7 +32,7 @@ eval_every: 250
 sample_every: 0
 
 device_batch_size: 16
-total_batch_size: 524288   # explicit: auto (-1) would scale with value-bank params
+total_batch_size: 524288   # explicit for a visible matched budget (banks are excluded from scaling params, so auto -1 would be identical anyway)
 
 matrix_lr: 0.02
 unembedding_lr: 0.004

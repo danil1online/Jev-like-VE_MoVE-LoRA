@@ -5,6 +5,7 @@ from jevelike.jev import (
     JevRenderer, JevAdapter, jev_ce_loss, answer_probs, decide,
     calibration_metrics, calibrate_probs, fit_temperature, IGNORE_INDEX,
 )
+from jevelike.configs import JevConfig
 from conftest import build_tiny
 
 
@@ -35,6 +36,15 @@ def test_renderer_layout(fake_tokenizer, jev_config):
         r.render_one("t", "q", "некандидат")
     with pytest.raises(AssertionError):
         r.candidates_for("bogus")
+
+
+def test_render_one_truncates_to_max_lengths(fake_tokenizer):
+    cfg = JevConfig(max_ctx_len=4, max_q_len=2)
+    r = JevRenderer(fake_tokenizer, cfg)
+    ids, _ = r.render_one("a b c d e f g h", "q1 q2 q3", "да")
+    # bos + ctx + 4 ctx tokens + q marker + 2 question tokens + a marker
+    assert len(ids) == 2 + 4 + 1 + 2 + 1
+    assert ids[0] == r.bos_id and ids[1] == r.ctx_id and ids[-1] == r.a_id
 
 
 def test_make_batch(fake_tokenizer, jev_config):

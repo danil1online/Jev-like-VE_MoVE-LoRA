@@ -62,14 +62,17 @@ def test_optimizer_steps(model_config):
     idx = torch.randint(0, model_config.vocab_size, (2, 16))
     targets = torch.randint(0, model_config.vocab_size, (2, 16))
     x0_before = model.x0_lambdas.detach().clone()
+    c_q_before = model.transformer.h[0].attn.c_q.weight.detach().clone()
     for _ in range(3):
         optimizer.zero_grad()
         loss = model(idx, targets)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
-    # scalar lr=0.5 -> x0_lambdas must have moved
+    # scalar lr=0.5 -> x0_lambdas must have moved (AdamW group)
     assert not torch.equal(model.x0_lambdas.detach(), x0_before)
+    # Muon group: attention matrix must have moved too
+    assert not torch.equal(model.transformer.h[0].attn.c_q.weight.detach(), c_q_before)
     # optimizer state bookkeeping survived
     assert len(optimizer.state) >= 1
 
@@ -119,11 +122,44 @@ def test_adapter_checkpoint_roundtrip(tmp_path):
     meta = {"base_checkpoint": "checkpoints/d12_move/model_000250.pt", "lora_config": {"rank": 2}}
     path = str(tmp_path / "jev_checkpoints" / "d12_move" / "adapter_000123.pt")
     save_adapter(path, 123, state, meta)
-    loaded, step, lmeta = load_adapter(path, "cpu")
+    loaded, step, lmeta, optim = load_adapter(path, "cpu")
     assert step == 123
     torch.testing.assert_close(loaded["lora_A"], state["lora_A"])
     assert lmeta["lora_config"]["rank"] == 2
+    assert optim is None  # not saved in this call
     assert find_last_adapter(os.path.dirname(path)) == 123
+
+
+def test_meta_build_forward_and_buffers(model_config):
+    """Production build path (base-train / checkpoint.build_model): meta init -> to_empty ->
+    init_weights. Rotary buffers must end up on the parameter device (regression: they used
+    to be recomputed on CPU and crashed GPU forwards at the device assert)."""
+    move = resolve_move(MoveConfig(mode="move", num_slots=1), model_config)
+    with torch.device("meta"):
+        model = GPT(model_config, move=move)
+    device = torch.device("cpu")
+    model.to_empty(device=device)
+    model.init_weights()
+    assert model.cos.device == model.get_device()
+    assert model.sin.device == model.get_device()
+    idx = torch.randint(0, model_config.vocab_size, (2, 16))
+    targets = torch.randint(0, model_config.vocab_size, (2, 16))
+    loss = model(idx, targets)
+    assert torch.isfinite(loss)
+    loss.backward()
+
+
+def test_generate_kv_cache_matches_nocache(model_config):
+    """KV-cache generation must produce the same tokens as the naive full-recompute path."""
+    from jevelike.common import COMPUTE_DTYPE
+    from jevelike.gpt import KVCache
+    model = build_tiny(model_config, mode="off")
+    prompt = torch.randint(0, model_config.vocab_size, (8,)).tolist()
+    ref = list(model.generate(prompt, max_tokens=6, temperature=0.0))
+    kv = KVCache(model.config.n_layer, model.config.sequence_len, model.config.n_kv_head,
+                 model.config.head_dim, COMPUTE_DTYPE, torch.device("cpu"))
+    out = list(model.generate(prompt, max_tokens=6, temperature=0.0, kv_cache=kv))
+    assert out == ref
 
 
 def _make_data_dir(data_dir, n_docs=60, row_group_size=10):

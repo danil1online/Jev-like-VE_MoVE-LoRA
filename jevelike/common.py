@@ -145,7 +145,8 @@ class JsonlLogger:
         self.t0 = time.time()
 
     def log(self, **kwargs):
-        entry = {"step": int(time.time() - self.t0), **kwargs}
+        # "t" = elapsed seconds since logger open; training step comes via kwargs["step"]
+        entry = {"t": int(time.time() - self.t0), **kwargs}
         self.file.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
         self.file.flush()
 

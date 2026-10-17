@@ -21,6 +21,7 @@ The script is resumable: source texts already present in raw.jsonl are skipped.
 """
 import os
 import json
+import time
 import argparse
 import hashlib
 import random
@@ -121,21 +122,29 @@ def pair_rows(text, pair, pair_id, lang="ru"):
 
 
 def split_rows(rows, val_frac, seed=42):
-    """Deterministic train/val split that keeps both rows of a pair together."""
+    """Deterministic train/val split that keeps both rows of a pair together.
+    A pair's membership depends only on (pair_id, seed), so the val set of existing
+    pairs is stable when new pairs are appended to raw.jsonl later."""
     by_pair = {}
     for r in rows:
         by_pair.setdefault(r["pair_id"], []).append(r)
-    pairs = list(by_pair)
-    rng = random.Random(seed)
-    rng.shuffle(pairs)
-    n_val = max(0, min(len(pairs), round(len(pairs) * val_frac)))
-    val_pairs, train_pairs = set(pairs[:n_val]), set(pairs[n_val:])
-    train, val = [], []
-    for pid in pairs:
-        (val if pid in val_pairs else train).extend(by_pair[pid])
-    rng.shuffle(train)
-    rng.shuffle(val)
-    return train, val
+
+    def is_val(pid):
+        h = hashlib.md5(f"{seed}:{pid}".encode("utf-8")).digest()
+        return int.from_bytes(h[:4], "big") / 2 ** 32 < val_frac
+
+    pairs = sorted(by_pair)
+    train_pairs = [p for p in pairs if not is_val(p)]
+    val_pairs = [p for p in pairs if is_val(p)]
+
+    def ordered(pair_ids):
+        out = []
+        for p in pair_ids:
+            out.extend(by_pair[p])
+        rng = random.Random(seed)
+        rng.shuffle(out)
+        return out
+    return ordered(train_pairs), ordered(val_pairs)
 
 
 def ask_llm_pair(text, max_retries=3, timeout=120, json_mode=True, lang="ru"):
@@ -167,6 +176,8 @@ def ask_llm_pair(text, max_retries=3, timeout=120, json_mode=True, lang="ru"):
                 return pair
         except Exception:
             pass
+        if attempt < max_retries - 1:
+            time.sleep(2.0 * (attempt + 1))
     return None
 
 

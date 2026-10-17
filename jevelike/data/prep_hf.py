@@ -95,17 +95,32 @@ def cache_path_for(url, cache_dir):
     return os.path.join(cache_dir, f"{h}_{base}")
 
 
+def _is_readable_parquet(path):
+    """True if the file's parquet footer is intact (a truncated download fails here)."""
+    try:
+        pq.ParquetFile(path)
+        return True
+    except Exception:
+        return False
+
+
 def download_parquets(urls, cache_dir, max_chars, chars_per_token=4.0, text_field="text"):
     """Download URLs into cache_dir until the accumulated text reaches max_chars.
-    Returns (cached_paths, total_chars). Resumable: existing files are not re-downloaded."""
+    Returns (cached_paths, total_chars). Resumable: existing readable files are not
+    re-downloaded; truncated/corrupt ones are completed via Range-resume (or re-fetched)."""
     os.makedirs(cache_dir, exist_ok=True)
     target = int(max_chars)
     cached, total_chars = [], 0
     for i, url in enumerate(urls):
         path = cache_path_for(url, cache_dir)
-        if not os.path.exists(path) or os.path.getsize(path) == 0:
+        if not os.path.exists(path) or os.path.getsize(path) == 0 or not _is_readable_parquet(path):
             print0(f"[{i + 1}/{len(urls)}] downloading {url}")
             download_file(url, path, headers=_auth_headers())
+            if not _is_readable_parquet(path):
+                # complete but unreadable (corrupt): re-download from scratch
+                os.remove(path)
+                print0(f"  cached copy was corrupt; re-downloading {url} from scratch")
+                download_file(url, path, headers=_auth_headers())
         chars = count_text_chars(path, text_field)
         cached.append(path)
         total_chars += chars
@@ -223,6 +238,13 @@ def main():
 
     data_dir = args.data_dir or os.path.join(os.getcwd(), "data")
     cache_dir = args.cache_dir or os.path.join(data_dir, "hf_cache")
+
+    if os.path.isdir(data_dir):
+        stale = [f for f in os.listdir(data_dir)
+                 if (f.startswith("hf_train_") or f.startswith("hf_val_")) and f.endswith(".parquet")]
+        if stale:
+            print0(f"WARNING: {len(stale)} existing hf_* shards in {data_dir} "
+                   f"(e.g. {stale[0]}); they will mix with the new ones. Remove them first for a clean run.")
 
     if args.skip_download:
         cached = sorted(

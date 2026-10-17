@@ -86,14 +86,19 @@ def parse_args():
 
 def apply_overrides(cfg, pairs):
     for pair in pairs:
-        key, _, value = pair.partition("=")
-        value = json.loads(value)  # ints/floats/bools/strings
+        key, _, raw = pair.partition("=")
         node = cfg
         parts = key.split(".")
         for part in parts[:-1]:
             node = getattr(node, part)
         old = getattr(node, parts[-1])
-        if isinstance(old, bool) and not isinstance(value, bool):
+        try:
+            value = json.loads(raw)  # ints/floats/bools/quoted strings
+        except json.JSONDecodeError:
+            value = raw
+        if isinstance(old, str) and not isinstance(value, str):
+            value = raw  # string field: keep the raw text (e.g. digit tokens "23456789")
+        elif isinstance(old, bool) and not isinstance(value, bool):
             value = value == "true" or value is True
         setattr(node, parts[-1], value)
 

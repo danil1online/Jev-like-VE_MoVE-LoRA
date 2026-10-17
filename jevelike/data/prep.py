@@ -41,6 +41,11 @@ def main():
     data_dir = args.data_dir or os.path.join(os.getcwd(), "data")
     os.makedirs(data_dir, exist_ok=True)
 
+    stale = [f for f in os.listdir(data_dir) if f.startswith("ruwiki_") and f.endswith(".parquet")]
+    if stale:
+        print0(f"WARNING: {len(stale)} existing ruwiki_*.parquet shards in {data_dir} "
+               f"(e.g. {stale[0]}); they will mix with the new ones. Remove them first for a clean run.")
+
     input_path = args.input
     if input_path is None:
         if args.no_download:

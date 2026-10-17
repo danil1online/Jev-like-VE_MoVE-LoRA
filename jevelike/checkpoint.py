@@ -16,10 +16,17 @@ from jevelike.tokenizer import get_tokenizer
 logger = get_logger(__name__)
 
 
+def _atomic_torch_save(data, path):
+    """Save to a temp file and rename, so a crash mid-save never leaves a corrupt checkpoint."""
+    tmp_path = path + ".tmp"
+    torch.save(data, tmp_path)
+    os.replace(tmp_path, path)
+
+
 def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data):
     os.makedirs(checkpoint_dir, exist_ok=True)
     model_path = os.path.join(checkpoint_dir, f"model_{step:06d}.pt")
-    torch.save(model_data, model_path)
+    _atomic_torch_save(model_data, model_path)
     logger.info(f"Saved model parameters to: {model_path}")
     meta_path = os.path.join(checkpoint_dir, f"meta_{step:06d}.json")
     with open(meta_path, "w", encoding="utf-8") as f:
@@ -27,7 +34,7 @@ def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data)
     logger.info(f"Saved metadata to: {meta_path}")
     if optimizer_data is not None:
         optimizer_path = os.path.join(checkpoint_dir, f"optim_{step:06d}.pt")
-        torch.save(optimizer_data, optimizer_path)
+        _atomic_torch_save(optimizer_data, optimizer_path)
         logger.info(f"Saved optimizer state to: {optimizer_path}")
 
 
@@ -140,16 +147,18 @@ def load_optimizer_state(checkpoint_dir, step, device):
 # -----------------------------------------------------------------------------
 # Jev LoRA adapter checkpoints (trainable adapter only, no base weights)
 
-def save_adapter(path, step, adapter_state, meta_data=None):
+def save_adapter(path, step, adapter_state, meta_data=None, optim_state=None):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    payload = {"step": step, "adapter": adapter_state, "meta": meta_data or {}}
+    payload = {"step": step, "adapter": adapter_state, "meta": meta_data or {}, "optim": optim_state}
     torch.save(payload, path)
     logger.info(f"Saved adapter to: {path}")
 
 
 def load_adapter(path, device):
+    """Returns (adapter_state, step, meta, optim_state). optim_state is None for
+    checkpoints written before optimizer state was saved."""
     payload = torch.load(path, map_location=device)
-    return payload["adapter"], payload.get("step", None), payload.get("meta", {})
+    return payload["adapter"], payload.get("step", None), payload.get("meta", {}), payload.get("optim", None)
 
 
 def find_last_adapter(adi_dir):

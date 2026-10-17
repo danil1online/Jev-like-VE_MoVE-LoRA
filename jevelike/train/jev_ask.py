@@ -89,7 +89,7 @@ def main():
     else:
         step = find_last_adapter(adapter_dir)
         adapter_path = os.path.join(adapter_dir, f"adapter_{step:06d}.pt")
-    adapter_state, step, a_meta = load_adapter(adapter_path, device)
+    adapter_state, step, a_meta, _ = load_adapter(adapter_path, device)
     adapter.load_adapter_state(adapter_state)
     check_adapter_meta(a_meta, cfg, adapter_path)
     print0(f"Adapter step: {step}")

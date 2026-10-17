@@ -93,8 +93,11 @@ def main():
     tokenizer.save(tokenizer_dir)
     build_token_bytes(tokenizer, tokenizer_dir)
 
-    # quick inline sanity check
-    test_text = "Привет, мир! Это тест.\nЧисла: 123, 4567, 89\nОсобые: да нет А Б В"
+    # quick inline sanity check (language-appropriate: an EN-only tokenizer need not roundtrip Cyrillic)
+    if args.lang in ("ru", "both"):
+        test_text = "Привет, мир! Это тест.\nЧисла: 123, 4567, 89\nОсобые: да нет А Б В"
+    else:
+        test_text = "Hello, world! This is a test.\nNumbers: 123, 4567, 89\nSpecial: yes no A B C"
     encoded = tokenizer.encode(test_text)
     decoded = tokenizer.decode(encoded)
     assert decoded == test_text, f"tokenizer roundtrip failed: {decoded!r}"

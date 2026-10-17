@@ -119,6 +119,9 @@ class MoveConfig:
             assert all(isinstance(i, int) and i >= 0 for i in self.lave_layers), \
                 f"lave_layers list entries must be non-negative ints: {self.lave_layers}"
         assert self.gate_scale > 0
+        if self.mode == "lave":
+            assert self.lave_slots <= 1, \
+                f"lave mode supports a single slot per layer (lave_slots must be <= 1), got {self.lave_slots}"
 
     def as_dict(self):
         return asdict(self)

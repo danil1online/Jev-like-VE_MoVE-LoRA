@@ -295,8 +295,9 @@ class GPT(nn.Module):
         for bank in getattr(self, "value_embeds", {}).values():
             bank.init_weights(s)
 
-        # rotary embeddings
-        cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, self.config.head_dim)
+        # rotary embeddings (recomputed on the parameter device: buffers must follow to_empty())
+        dev = self.transformer.wte.weight.device
+        cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, self.config.head_dim, device=dev)
         self.cos, self.sin = cos, sin
 
         # Cast embeddings to COMPUTE_DTYPE (fp32 master weights are fine for the optimizer)
